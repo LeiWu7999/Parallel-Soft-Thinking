@@ -71,6 +71,9 @@ def main():
     parser.add_argument("--enable_soft_thinking", action="store_true", help="Enable soft thinking mode")
     parser.add_argument("--think_end_str", type=str, default="</think>")
     parser.add_argument("--max_topk", type=int, default=15)
+    parser.add_argument("--soft_thinking_trigger_entropy", type=float, default=-1.0, help="Entropy threshold to trigger soft thinking mode dynamically.")
+    parser.add_argument("--soft_thinking_steps", type=int, default=1, help="Number of steps to stay in soft thinking mode after triggered.")
+    parser.add_argument("--max_soft_thinking_triggers", type=int, default=1, help="Max times to trigger soft thinking per request.")
 
     args = parser.parse_args()
 
@@ -181,7 +184,10 @@ Test Cases:
                         "gumbel_softmax_temperature": args.gumbel_softmax_temperature, "dirichlet_alpha": args.dirichlet_alpha,
                         "max_new_tokens": max_generated_tokens, "think_end_str": think_end_str,
                         "early_stopping_entropy_threshold": args.early_stopping_entropy_threshold,
-                        "early_stopping_length_threshold": args.early_stopping_length_threshold
+                        "early_stopping_length_threshold": args.early_stopping_length_threshold,
+                        "soft_thinking_trigger_entropy": args.soft_thinking_trigger_entropy,
+                        "soft_thinking_steps": args.soft_thinking_steps,
+                        "max_soft_thinking_triggers": args.max_soft_thinking_triggers,
                     }
 
     os.makedirs(f"{args.output_dir}/results/{dataset}", exist_ok=True)
@@ -193,7 +199,9 @@ Test Cases:
         f"{model_name.split('/')[-1]}_{dataset}_{args.enable_soft_thinking}_{args.num_samples}_"
         f"{temperature}_{top_p}_{top_k}_{min_p}_{args.repetition_penalty}_{args.dirichlet_alpha}_"
         f"{args.max_topk}_{max_generated_tokens}_{args.early_stopping_entropy_threshold}_"
-        f"{args.early_stopping_length_threshold}{noise_suffix}"
+        f"{args.early_stopping_length_threshold}_"
+        f"{args.soft_thinking_trigger_entropy}_{args.soft_thinking_steps}_{args.max_soft_thinking_triggers}"
+        f"{noise_suffix}"
     )
     results_file = f"{args.output_dir}/results/{dataset}/{base_filename}.json"
     results_statistics_file = f"{args.output_dir}/results/{dataset}/{base_filename}_statistics.json"
@@ -251,6 +259,7 @@ Test Cases:
         decoded_text_list = []
         finish_generation_list = []
         generated_tokens_list = []
+        trigger_count_list = []
         idx = 0
         while idx < len(prompt_list):
             print(f"Number of GPUs available: {num_gpus}", flush=True)
@@ -276,6 +285,7 @@ Test Cases:
             finish_generation_list.extend([o["meta_info"]["finish_reason"]["type"] == "stop" and not args.enable_soft_thinking for o in outputs])
 
             generated_tokens_list.extend([o["meta_info"]["completion_tokens"] for o in outputs])
+            trigger_count_list.extend([o["meta_info"].get("trigger_count", 0) for o in outputs])
             idx += max_batch
             outputs = None
             llm.shutdown()
@@ -353,6 +363,7 @@ Test Cases:
             "ground_truth": sample["final_answer"],
             "generated_tokens": generated_tokens_list[i*args.num_samples:(i+1)*args.num_samples],
             "avg_generated_tokens": sum(generated_tokens_list[i*args.num_samples:(i+1)*args.num_samples])/args.num_samples,
+            "avg_trigger_count": sum(trigger_count_list[i*args.num_samples:(i+1)*args.num_samples])/args.num_samples,
             "time": 0,
             "idx": idx,
             "n": args.num_samples,
@@ -429,6 +440,7 @@ Test Cases:
         "pass@1": pass_at_1,
         "avg_token_length-all": sum([r["avg_generated_tokens"] for r in results]) / total_num if total_num > 0 else 0,
         "avg_token_length-correct": sum([r["avg_generated_tokens"] for r in results if r["passat1"] > 0]) / len([r["passat1"] for r in results if r["passat1"] > 0]) if len([r["passat1"] for r in results if r["passat1"] > 0]) > 0 else 0,
+        "avg_trigger_count": sum([r["avg_trigger_count"] for r in results]) / total_num if total_num > 0 else 0,
         "time_taken/h": (end_time - start_time)/3600
     }
 

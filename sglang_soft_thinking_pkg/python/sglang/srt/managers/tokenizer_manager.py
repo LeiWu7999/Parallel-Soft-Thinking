@@ -1048,6 +1048,9 @@ class TokenizerManager:
                 "prompt_tokens": recv_obj.prompt_tokens[i],
             }
 
+            if getattr(recv_obj, "trigger_counts", None):
+                meta_info["trigger_count"] = recv_obj.trigger_counts[i]
+
             if getattr(state.obj, "return_logprob", False):
                 self.convert_logprob_style(
                     meta_info,

@@ -528,6 +528,7 @@ class SchedulerOutputProcessorMixin:
         # Always initialize soft thinking output lists so they exist regardless of flag
         output_topk_probs_list = []
         output_topk_indices_list = []
+        trigger_counts = []
         # ==========
         # end of soft thinking
         # ==========
@@ -607,6 +608,7 @@ class SchedulerOutputProcessorMixin:
                 if self.enable_soft_thinking:
                     output_topk_probs_list.append(req.get_output_topk_prob_list())
                     output_topk_indices_list.append(req.get_output_topk_idx_list())
+                trigger_counts.append(getattr(req, "trigger_count", 0))
                 # ==========
                 # end of soft thinking
                 # ==========
@@ -650,6 +652,7 @@ class SchedulerOutputProcessorMixin:
                     # ==========
                     output_topk_probs_list,
                     output_topk_indices_list,
+                    trigger_counts,
                     # ==========
                     # end of soft thinking
                     # ==========

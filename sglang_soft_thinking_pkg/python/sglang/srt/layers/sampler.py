@@ -191,17 +191,24 @@ class Sampler(nn.Module):
                         sampled_token_ids = torch.multinomial(probs, num_samples=1)
 
                         # For rows where soft_thinking_modes is False
-                        topk_probs[non_soft_mask] = 0.0
-                        topk_indices[non_soft_mask] = 0
+                        # NOTE: We disable the forced collapsing here to support dynamic triggering.
+                        # Scheduler will decide whether to collapse (Discrete Mode) or keep dense (Triggered Soft Thinking).
+                        # topk_probs[non_soft_mask] = 0.0
+                        # topk_indices[non_soft_mask] = 0
 
                         # Assign the first element of each row to sampled_token_ids and set it to 1.0 in topk_probs
-                        topk_probs[non_soft_mask, 0] = 1.0
-                        topk_indices[non_soft_mask, 0] = sampled_token_ids[non_soft_mask].view(-1)
+                        # topk_probs[non_soft_mask, 0] = 1.0
+                        # topk_indices[non_soft_mask, 0] = sampled_token_ids[non_soft_mask].view(-1)
+                    
+                    # Use sampled token for next_token_id if discrete, otherwise use argmax (from sorted topk)
+                    batch_next_token_ids = topk_indices[:, 0].to(torch.int32).clone()
+                    if any(non_soft_mask):
+                        batch_next_token_ids[non_soft_mask] = sampled_token_ids[non_soft_mask].view(-1).to(torch.int32)
 
                     logits_output.topk_probs = topk_probs
                     logits_output.topk_indices = topk_indices
                     logits_output.entropy = entropy
-                    batch_next_token_ids = topk_indices[:, 0].to(torch.int32)
+                    # batch_next_token_ids = topk_indices[:, 0].to(torch.int32)
                 # ==========
                 # end of soft thinking
                 # ========== 

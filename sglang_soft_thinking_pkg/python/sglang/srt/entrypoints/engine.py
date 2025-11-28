@@ -82,6 +82,19 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 _is_cuda = is_cuda()
 
 
+def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
+    """
+    Compat helper for Python 3.11+ where asyncio.get_event_loop() no longer
+    creates an event loop implicitly in the main thread.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
 class Engine(EngineBase):
     """
     The entry point to the inference engine.
@@ -180,7 +193,7 @@ class Engine(EngineBase):
             return_hidden_states=return_hidden_states,
             stream=stream,
         )
-        loop = asyncio.get_event_loop()
+        loop = _get_or_create_event_loop()
         generator = self.tokenizer_manager.generate_request(obj, None)
 
         if stream:
@@ -266,7 +279,7 @@ class Engine(EngineBase):
         Please refer to `EmbeddingReqInput` for the documentation.
         """
         obj = EmbeddingReqInput(text=prompt, image_data=image_data)
-        loop = asyncio.get_event_loop()
+        loop = _get_or_create_event_loop()
         generator = self.tokenizer_manager.generate_request(obj, None)
         ret = loop.run_until_complete(generator.__anext__())
         return ret

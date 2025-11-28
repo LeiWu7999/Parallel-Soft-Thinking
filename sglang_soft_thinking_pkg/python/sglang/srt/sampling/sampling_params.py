@@ -48,6 +48,9 @@ class SamplingParams:
         early_stopping_length_threshold: int = 200,
         think_end_str: Optional[str] = None,
         gumbel_softmax_temperature: float = 1.0,
+        soft_thinking_trigger_entropy: float = -1.0,
+        soft_thinking_steps: int = 1,
+        max_soft_thinking_triggers: int = 1,
         # ==========
         # end of soft thinking
         # ==========
@@ -91,6 +94,9 @@ class SamplingParams:
         self.dirichlet_alpha = dirichlet_alpha
         # Gumbel-softmax sampling parameters
         self.gumbel_softmax_temperature = gumbel_softmax_temperature
+        self.soft_thinking_trigger_entropy = soft_thinking_trigger_entropy
+        self.soft_thinking_steps = soft_thinking_steps
+        self.max_soft_thinking_triggers = max_soft_thinking_triggers
         # ==========
         # end of soft thinking
         # ==========
@@ -208,4 +214,8 @@ class SamplingParams:
 
     def post_init_soft_thinking_mode(self):
         # TODO: 换成cpu的，然后init的时候再传输，topk也是一样，会造成主卡显存不足
-        self.soft_thinking_mode = torch.tensor(True, dtype=torch.bool, device='cuda') 
+        # If using dynamic trigger, start with False. Otherwise start with True.
+        initial_mode = True
+        if self.soft_thinking_trigger_entropy > 0:
+            initial_mode = False
+        self.soft_thinking_mode = torch.tensor(initial_mode, dtype=torch.bool, device='cuda') 

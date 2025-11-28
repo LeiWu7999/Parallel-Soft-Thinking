@@ -205,6 +205,9 @@ class ServerArgs:
     max_topk: int = 30
     add_noise_dirichlet: bool = False
     add_noise_gumbel_softmax: bool = False
+    soft_thinking_trigger_entropy: float = -1.0
+    soft_thinking_steps: int = 1
+    max_soft_thinking_triggers: int = 1
     # ==========
     # end of soft thinking
     # ==========
@@ -1192,6 +1195,24 @@ class ServerArgs:
             "--max-topk",
             type=int,
             default=ServerArgs.max_topk,
+        )
+        parser.add_argument(
+            "--soft-thinking-trigger-entropy",
+            type=float,
+            default=ServerArgs.soft_thinking_trigger_entropy,
+            help="Entropy threshold to trigger soft thinking mode dynamically.",
+        )
+        parser.add_argument(
+            "--soft-thinking-steps",
+            type=int,
+            default=ServerArgs.soft_thinking_steps,
+            help="Number of steps to stay in soft thinking mode after triggered.",
+        )
+        parser.add_argument(
+            "--max-soft-thinking-triggers",
+            type=int,
+            default=ServerArgs.max_soft_thinking_triggers,
+            help="Max times to trigger soft thinking per request.",
         )
         # ==========
         # end of soft thinking

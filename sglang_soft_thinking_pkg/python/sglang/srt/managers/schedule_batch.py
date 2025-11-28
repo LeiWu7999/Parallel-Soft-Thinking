@@ -598,6 +598,10 @@ class Req:
             self.output_topk_idx_list_tmp = []
             # track consecutive low entropy steps for early stopping
             self.low_entropy_steps = 0
+            
+            # New fields for dynamic triggering
+            self.trigger_count = 0
+            self.current_soft_thinking_steps = 0
         # ==========
         # end of soft thinking
         # ==========
@@ -730,53 +734,98 @@ class Req:
         self.entropy = logits_output.entropy[index]
         # last_token_id = self.output_ids[-1]
 
+        # Dynamic Soft Thinking Logic
+        dynamic_enabled = self.sampling_params.soft_thinking_trigger_entropy > 0
+        
         if self.sampling_params.soft_thinking_mode:
+            # 如果当前是 soft thinking 模式
+            
+            should_exit = False
+            
+            if dynamic_enabled:
+                # 动态模式下，检查步数
+                self.current_soft_thinking_steps += 1
+                if self.current_soft_thinking_steps >= self.sampling_params.soft_thinking_steps:
+                    should_exit = True
+            
+            # 无论哪种模式，都检查 think_end_str (兼容性)
             if self.sampling_params.think_end_str_id is None:
                 self.sampling_params.think_end_str_id = self.tokenizer.encode(self.sampling_params.think_end_str,add_special_tokens=False)[-1]
-            # early stopping: replace with think_end_str_id if entropy remains low
-            if self.sampling_params.early_stopping_entropy_threshold > 0:
-                if self.entropy < self.sampling_params.early_stopping_entropy_threshold:
-                    self.low_entropy_steps += 1
-                else:
-                    self.low_entropy_steps = 0
-                if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
-                    print(f"Early stopping triggered", flush=True)
-                    # trigger early stop, emit think_end_str token
-                    self.output_ids[-1] = self.sampling_params.think_end_str_id
-                    self.topk_prob[1:].fill_(0)
-                    self.topk_idx[1:].fill_(0)
-                    self.topk_prob[0] = 1.0
-                    self.topk_idx[0] = self.sampling_params.think_end_str_id
-                    self.low_entropy_steps = 0
+            
+            if not should_exit:
+                # 原有的早停逻辑 (仅在非动态模式或辅助使用)
+                if self.sampling_params.early_stopping_entropy_threshold > 0:
+                    if self.entropy < self.sampling_params.early_stopping_entropy_threshold:
+                        self.low_entropy_steps += 1
+                    else:
+                        self.low_entropy_steps = 0
+                    if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
+                        print(f"Early stopping triggered", flush=True)
+                        # trigger early stop, emit think_end_str token
+                        self.output_ids[-1] = self.sampling_params.think_end_str_id
+                        self.topk_prob[1:].fill_(0)
+                        self.topk_idx[1:].fill_(0)
+                        self.topk_prob[0] = 1.0
+                        self.topk_idx[0] = self.sampling_params.think_end_str_id
+                        self.low_entropy_steps = 0
+                        should_exit = True
 
             if self.sampling_params.think_end_str_id == self.output_ids[-1]:
+                should_exit = True
+
+            if should_exit:
                 # 退出 soft thinking 模式并将 topk 设置为 one-hot
                 self.sampling_params.soft_thinking_mode = False
-                # 一键清零再设置 head
+                # 一键清零再设置 head (使用当前输出的 token)
                 self.topk_prob[1:].fill_(0)
                 self.topk_idx[1:].fill_(0)
                 self.topk_prob[0] = 1.0
-                self.topk_idx[0] = self.sampling_params.think_end_str_id
+                # 注意: 这里应该使用 output_ids[-1]，如果早停触发了它已经被修改为 think_end_str
+                self.topk_idx[0] = self.output_ids[-1] 
                 self.low_entropy_steps = 0
+                self.current_soft_thinking_steps = 0
+                
         else:
-            if self.sampling_params.early_stopping_entropy_threshold > 0:
-                if self.entropy < self.sampling_params.early_stopping_entropy_threshold:
-                    self.low_entropy_steps += 1
-                else:
-                    self.low_entropy_steps = 0
-                if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
-                    print(f"Early stopping triggered.", flush=True)
-                    self.to_abort = True
+            # 当前是离散模式
+            
+            triggered = False
+            if dynamic_enabled:
+                # 检查是否触发 Soft Thinking
+                if (self.entropy > self.sampling_params.soft_thinking_trigger_entropy 
+                    and self.trigger_count < self.sampling_params.max_soft_thinking_triggers):
+                    
+                    triggered = True
+                    self.sampling_params.soft_thinking_mode = True
+                    self.trigger_count += 1
+                    self.current_soft_thinking_steps = 0
+                    # 保留 topk_prob/idx 为 dense 分布，作为下一轮的输入
+                    # 不要清零！
+            
+            if not triggered:
+                # 保持离散模式，手动坍缩 topk 为 one-hot
+                if self.sampling_params.early_stopping_entropy_threshold > 0:
+                    if self.entropy < self.sampling_params.early_stopping_entropy_threshold:
+                        self.low_entropy_steps += 1
+                    else:
+                        self.low_entropy_steps = 0
+                    if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
+                        print(f"Early stopping triggered.", flush=True)
+                        self.to_abort = True
 
-            # 普通模式下只需 in-place 清零 tail，head 保持 logits 输出
-            self.topk_prob[1:].fill_(0)
-            self.topk_idx[1:].fill_(0)
-            self.topk_prob[0] = 1.0
+                # 普通模式下只需 in-place 清零 tail，head 保持 logits 输出 (实际上是 output_ids[-1])
+                self.topk_prob[1:].fill_(0)
+                self.topk_idx[1:].fill_(0)
+                self.topk_prob[0] = 1.0
+                # 关键修正：离散模式下，下一轮的 embedding 输入应当是当前采样出的 token
+                self.topk_idx[0] = self.output_ids[-1]
 
         # 仅在未完成时记录 topk 信息
         if not self.finished():
             self.output_topk_prob_list_tmp.append(self.topk_prob)
             self.output_topk_idx_list_tmp.append(self.topk_idx)
+
+    def get_trigger_count(self):
+        return self.trigger_count
 
     def get_output_topk_prob_list(self):
         if self.output_topk_prob_list_tmp:
