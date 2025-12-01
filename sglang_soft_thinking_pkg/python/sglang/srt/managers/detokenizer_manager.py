@@ -234,6 +234,7 @@ class DetokenizerManager:
             # ==========
             output_topk_probs_list=recv_obj.output_topk_probs_list,
             output_topk_indices_list=recv_obj.output_topk_indices_list,
+            trigger_counts=recv_obj.trigger_counts,
             # ==========
             # end of soft thinking
             # ==========

@@ -97,6 +97,7 @@ from sglang.srt.managers.schedule_batch import (
     Req,
     ScheduleBatch,
     global_server_args_dict,
+    entropy_list_global,
 )
 from sglang.srt.managers.schedule_policy import (
     AddReqResult,
@@ -1673,6 +1674,28 @@ class Scheduler(
             ret["avg_spec_accept_length"] = (
                 self.cum_spec_accept_length / self.cum_spec_accept_count
             )
+
+        # ==========
+        # begin of soft thinking (entropy stats)
+        # ==========
+        # Compute mean and 80th percentile of per-token entropies if available.
+        try:
+            import torch
+        except ImportError:
+            ret["entropy_mean"] = 0.0
+            ret["entropy_p80"] = 0.0
+        else:
+            if entropy_list_global:
+                ents = torch.tensor(entropy_list_global, dtype=torch.float32)
+                ret["entropy_mean"] = float(ents.mean().item())
+                # p80 使用 0.8 分位数
+                ret["entropy_p80"] = float(torch.quantile(ents, 0.8).item())
+            else:
+                ret["entropy_mean"] = 0.0
+                ret["entropy_p80"] = 0.0
+        # ==========
+        # end of soft thinking (entropy stats)
+        # ==========
 
         if RECORD_STEP_TIME:
             ret["step_time_dict"] = self.step_time_dict

@@ -5,7 +5,7 @@ set -e  # 遇到错误立即退出
 # 请根据实际情况修改模型路径
 MODEL_PATH="Qwen/QwQ-32B" 
 # 目标数据集
-DATASET="aime2024"
+DATASET="aime2025"
 # 输出目录
 OUTPUT_DIR="./outputs"
 # GPU数量
@@ -36,23 +36,23 @@ mkdir -p $OUTPUT_DIR
 # -------------------------------------------
 # 实验 1: Discrete CoT (基线)
 # -------------------------------------------
-echo "[1/3] Running Discrete CoT..."
-python run_sglang_softthinking.py $COMMON_ARGS \
-    --max_topk 10 \
-    --num_samples 16
+# echo "[1/3] Running Discrete CoT..."
+# python run_sglang_softthinking.py $COMMON_ARGS \
+#     --max_topk 10 \
+#     --num_samples 16
     # 注意: 不加 --enable_soft_thinking 即为离散模式
 
 # -------------------------------------------
 # 实验 2: Original Soft Thinking (全程软思考 + 早停)
 # -------------------------------------------
-echo "[2/3] Running Original Soft Thinking..."
-# 参考 README 的参数推荐
-python run_sglang_softthinking.py $COMMON_ARGS \
-    --enable_soft_thinking \
-    --max_topk 10 \
-    --early_stopping_entropy_threshold 0.01 \
-    --early_stopping_length_threshold 256 \
-    --num_samples 1
+# echo "[2/3] Running Original Soft Thinking..."
+# # 参考 README 的参数推荐
+# python run_sglang_softthinking.py $COMMON_ARGS \
+#     --enable_soft_thinking \
+#     --max_topk 10 \
+#     --early_stopping_entropy_threshold 0.01 \
+#     --early_stopping_length_threshold 256 \
+#     --num_samples 1
 
 # -------------------------------------------
 # 实验 3: Entropy Triggered Soft Thinking (动态触发)
@@ -64,7 +64,7 @@ echo "[3/3] Running Entropy Triggered Soft Thinking..."
 python run_sglang_softthinking.py $COMMON_ARGS \
     --enable_soft_thinking \
     --max_topk 10 \
-    --soft_thinking_trigger_entropy 0.5 \
+    --soft_thinking_trigger_entropy 0.01 \
     --soft_thinking_steps 3 \
     --max_soft_thinking_triggers 10 \
     --early_stopping_entropy_threshold 0.0 \

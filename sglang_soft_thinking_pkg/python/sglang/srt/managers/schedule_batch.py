@@ -63,6 +63,16 @@ if TYPE_CHECKING:
 
 INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
+# ==========
+# begin of soft thinking (global entropy stats)
+# ==========
+# Collect per-token entropies when soft thinking is enabled (decode phase only).
+# Used for run-level statistics (mean / percentile), queried via get_internal_state.
+entropy_list_global = []
+# ==========
+# end of soft thinking (global entropy stats)
+# ==========
+
 # Put some global args for easy access
 global_server_args_dict = {
     "attention_backend": ServerArgs.attention_backend,
@@ -793,7 +803,16 @@ class Req:
                 # 检查是否触发 Soft Thinking
                 if (self.entropy > self.sampling_params.soft_thinking_trigger_entropy 
                     and self.trigger_count < self.sampling_params.max_soft_thinking_triggers):
-                    
+                    # 调试输出：仅打印前几次触发尝试，避免刷屏
+                    # if self.trigger_count < 3 and len(self.output_ids) <= 4:
+                    #     print(
+                    #         f"[SoftThinking Trigger] rid={self.rid}, "
+                    #         f"step={len(self.output_ids)}, "
+                    #         f"entropy={float(self.entropy):.4f}, "
+                    #         f"thr={self.sampling_params.soft_thinking_trigger_entropy:.4f}",
+                    #         flush=True,
+                    #     )
+
                     triggered = True
                     self.sampling_params.soft_thinking_mode = True
                     self.trigger_count += 1

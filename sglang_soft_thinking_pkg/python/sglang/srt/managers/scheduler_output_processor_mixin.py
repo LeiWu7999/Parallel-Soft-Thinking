@@ -5,7 +5,12 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import BatchEmbeddingOut, BatchTokenIDOut
-from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import (
+    BaseFinishReason,
+    Req,
+    ScheduleBatch,
+    entropy_list_global,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -278,7 +283,15 @@ class SchedulerOutputProcessorMixin:
             # begin of soft thinking
             # ==========
             if self.enable_soft_thinking:
+                # 更新该 request 的 soft thinking 状态机（包括动态触发逻辑）
                 req.update_topk_info(logits_output, i)
+                # 将最新的 soft_thinking_mode 写回 sampling_info，供下一步采样使用
+                if batch.sampling_info and batch.sampling_info.enable_soft_thinking:
+                    batch.sampling_info.soft_thinking_modes[i] = bool(
+                        req.sampling_params.soft_thinking_mode
+                    )
+                # 仅在 decode 阶段记录熵到全局统计
+                entropy_list_global.append(float(req.entropy))
             # ==========
             # end of soft thinking
             # ==========

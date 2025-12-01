@@ -215,7 +215,9 @@ class SamplingParams:
     def post_init_soft_thinking_mode(self):
         # TODO: 换成cpu的，然后init的时候再传输，topk也是一样，会造成主卡显存不足
         # If using dynamic trigger, start with False. Otherwise start with True.
+        # IMPORTANT: keep this as a plain Python bool.
+        # It is later collected into a torch.Tensor batch-wise in SamplingBatchInfo.
         initial_mode = True
         if self.soft_thinking_trigger_entropy > 0:
             initial_mode = False
-        self.soft_thinking_mode = torch.tensor(initial_mode, dtype=torch.bool, device='cuda') 
+        self.soft_thinking_mode = initial_mode

@@ -286,6 +286,15 @@ Test Cases:
 
             generated_tokens_list.extend([o["meta_info"]["completion_tokens"] for o in outputs])
             trigger_count_list.extend([o["meta_info"].get("trigger_count", 0) for o in outputs])
+            # 打印本次 Engine 运行期间的熵统计（如果可用）
+            try:
+                server_info = llm.get_server_info()
+                entropy_mean = server_info.get("entropy_mean", None)
+                entropy_p80 = server_info.get("entropy_p80", None)
+                if entropy_mean is not None and entropy_p80 is not None:
+                    print(f"[Entropy Stats] mean={entropy_mean:.4f}, p80={entropy_p80:.4f}", flush=True)
+            except Exception as e:
+                print(f"[Entropy Stats] failed to fetch: {e}", flush=True)
             idx += max_batch
             outputs = None
             llm.shutdown()
