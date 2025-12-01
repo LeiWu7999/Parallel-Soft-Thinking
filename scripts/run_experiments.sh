@@ -24,9 +24,10 @@ COMMON_ARGS="--dataset $DATASET \
 --after_thinking_temperature 0.6 \
 --after_thinking_top_p 0.95 \
 --after_thinking_top_k 30 \
---mem_fraction_static 0.8 \
---use_llm_judge \
---judge_model_name gpt-4.1-2025-04-14"
+--mem_fraction_static 0.8"
+
+# --use_llm_judge
+# --judge_model_name gpt-4.1-2025-04-14"
 # ===========================================
 
 echo "开始运行实验..."
