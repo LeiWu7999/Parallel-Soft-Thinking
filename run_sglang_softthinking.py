@@ -74,6 +74,7 @@ def main():
     parser.add_argument("--soft_thinking_trigger_entropy", type=float, default=-1.0, help="Entropy threshold to trigger soft thinking mode dynamically.")
     parser.add_argument("--soft_thinking_steps", type=int, default=1, help="Number of steps to stay in soft thinking mode after triggered.")
     parser.add_argument("--max_soft_thinking_triggers", type=int, default=1, help="Max times to trigger soft thinking per request.")
+    parser.add_argument("--random_think_prob", type=float, default=0.0, help="Random trigger probability for soft thinking (0 to disable).")
 
     args = parser.parse_args()
 
@@ -188,6 +189,7 @@ Test Cases:
                         "soft_thinking_trigger_entropy": args.soft_thinking_trigger_entropy,
                         "soft_thinking_steps": args.soft_thinking_steps,
                         "max_soft_thinking_triggers": args.max_soft_thinking_triggers,
+                        "random_think_prob": args.random_think_prob,
                     }
 
     os.makedirs(f"{args.output_dir}/results/{dataset}", exist_ok=True)
@@ -200,7 +202,8 @@ Test Cases:
         f"{temperature}_{top_p}_{top_k}_{min_p}_{args.repetition_penalty}_{args.dirichlet_alpha}_"
         f"{args.max_topk}_{max_generated_tokens}_{args.early_stopping_entropy_threshold}_"
         f"{args.early_stopping_length_threshold}_"
-        f"{args.soft_thinking_trigger_entropy}_{args.soft_thinking_steps}_{args.max_soft_thinking_triggers}"
+        f"{args.soft_thinking_trigger_entropy}_{args.soft_thinking_steps}_{args.max_soft_thinking_triggers}_"
+        f"{args.random_think_prob}"
         f"{noise_suffix}"
     )
     results_file = f"{args.output_dir}/results/{dataset}/{base_filename}.json"

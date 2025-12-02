@@ -51,6 +51,7 @@ class SamplingParams:
         soft_thinking_trigger_entropy: float = -1.0,
         soft_thinking_steps: int = 1,
         max_soft_thinking_triggers: int = 1,
+        random_think_prob: float = 0.0,
         # ==========
         # end of soft thinking
         # ==========
@@ -94,9 +95,12 @@ class SamplingParams:
         self.dirichlet_alpha = dirichlet_alpha
         # Gumbel-softmax sampling parameters
         self.gumbel_softmax_temperature = gumbel_softmax_temperature
+        # Soft thinking dynamic control
         self.soft_thinking_trigger_entropy = soft_thinking_trigger_entropy
         self.soft_thinking_steps = soft_thinking_steps
         self.max_soft_thinking_triggers = max_soft_thinking_triggers
+        # Random trigger prob (0 表示关闭随机触发，仅使用熵或静态模式)
+        self.random_think_prob = random_think_prob
         # ==========
         # end of soft thinking
         # ==========

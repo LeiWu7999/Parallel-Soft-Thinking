@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from enum import Enum, auto
+import random
 
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -745,7 +746,13 @@ class Req:
         # last_token_id = self.output_ids[-1]
 
         # Dynamic Soft Thinking Logic
-        dynamic_enabled = self.sampling_params.soft_thinking_trigger_entropy > 0
+        # 1) 熵触发：soft_thinking_trigger_entropy > 0
+        # 2) 随机触发：random_think_prob > 0
+        dynamic_entropy_enabled = (
+            self.sampling_params.soft_thinking_trigger_entropy > 0
+        )
+        random_enabled = getattr(self.sampling_params, "random_think_prob", 0.0) > 0.0
+        dynamic_enabled = dynamic_entropy_enabled or random_enabled
         
         if self.sampling_params.soft_thinking_mode:
             # 如果当前是 soft thinking 模式
@@ -753,9 +760,12 @@ class Req:
             should_exit = False
             
             if dynamic_enabled:
-                # 动态模式下，检查步数
+                # 动态模式下，soft_thinking_steps 控制一次触发后持续的步数
                 self.current_soft_thinking_steps += 1
-                if self.current_soft_thinking_steps >= self.sampling_params.soft_thinking_steps:
+                if (
+                    self.current_soft_thinking_steps
+                    >= self.sampling_params.soft_thinking_steps
+                ):
                     should_exit = True
             
             # 无论哪种模式，都检查 think_end_str (兼容性)
@@ -797,23 +807,24 @@ class Req:
                 
         else:
             # 当前是离散模式
-            
-            triggered = False
-            if dynamic_enabled:
-                # 检查是否触发 Soft Thinking
-                if (self.entropy > self.sampling_params.soft_thinking_trigger_entropy 
-                    and self.trigger_count < self.sampling_params.max_soft_thinking_triggers):
-                    # 调试输出：仅打印前几次触发尝试，避免刷屏
-                    # if self.trigger_count < 3 and len(self.output_ids) <= 4:
-                    #     print(
-                    #         f"[SoftThinking Trigger] rid={self.rid}, "
-                    #         f"step={len(self.output_ids)}, "
-                    #         f"entropy={float(self.entropy):.4f}, "
-                    #         f"thr={self.sampling_params.soft_thinking_trigger_entropy:.4f}",
-                    #         flush=True,
-                    #     )
 
+            triggered = False
+            if dynamic_enabled and (
+                self.trigger_count < self.sampling_params.max_soft_thinking_triggers
+            ):
+                # 1) 熵触发策略
+                if dynamic_entropy_enabled and (
+                    self.entropy
+                    >= self.sampling_params.soft_thinking_trigger_entropy
+                ):
                     triggered = True
+
+                # 2) 随机触发策略（仅在还未被熵触发时生效）
+                if (not triggered) and random_enabled:
+                    if random.random() < self.sampling_params.random_think_prob:
+                        triggered = True
+
+                if triggered:
                     self.sampling_params.soft_thinking_mode = True
                     self.trigger_count += 1
                     self.current_soft_thinking_steps = 0
