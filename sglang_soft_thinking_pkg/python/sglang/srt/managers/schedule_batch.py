@@ -86,6 +86,13 @@ global_server_args_dict = {
     "enable_deepep_moe": ServerArgs.enable_deepep_moe,
     "deepep_mode": ServerArgs.deepep_mode,
     "device": ServerArgs.device,
+    # ==========
+    # start of parallel soft thinking
+    # ==========
+    "lora_mode": ServerArgs.lora_mode,
+    # ==========
+    # end of parallel soft thinking
+    # ==========
     "speculative_accept_threshold_single": ServerArgs.speculative_accept_threshold_single,
     "speculative_accept_threshold_acc": ServerArgs.speculative_accept_threshold_acc,
     "disable_radix_cache": ServerArgs.disable_radix_cache,
@@ -1749,6 +1756,42 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # ==========
         # end of soft thinking
         # ==========
+        # ==========
+        # start of parallel soft thinking
+        # ==========
+        # LoRA routing
+        # - joint: always use req.lora_path
+        # - split: only enable LoRA during soft-thinking steps. Prefill/extend
+        #          always uses base (None). For mixed chunked prefill, only the
+        #          decoding part can enable LoRA.
+        lora_mode = global_server_args_dict.get("lora_mode", "joint")
+        if lora_mode == "split" and self.enable_soft_thinking:
+            if self.forward_mode.is_extend():
+                # 既有prefill也有decode
+                if self.forward_mode.is_mixed() and self.decoding_reqs is not None:
+                    decoding_req_set = set(self.decoding_reqs)
+                    lora_paths = [
+                        (
+                            req.lora_path
+                            if (req in decoding_req_set)
+                            and req.sampling_params.soft_thinking_mode
+                            else None
+                        )
+                        for req in self.reqs
+                    ]
+                # 处于prefill阶段
+                else:
+                    lora_paths = [None] * len(self.reqs)
+            else:
+                lora_paths = [
+                    req.lora_path if req.sampling_params.soft_thinking_mode else None
+                    for req in self.reqs
+                ]
+        else:
+            lora_paths = [req.lora_path for req in self.reqs]
+        # ==========
+        # end of parallel soft thinking
+        # ==========
 
         global bid
         bid += 1
@@ -1776,7 +1819,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             encoder_lens=self.encoder_lens,
             encoder_lens_cpu=self.encoder_lens_cpu,
             encoder_out_cache_loc=self.encoder_out_cache_loc,
-            lora_paths=[req.lora_path for req in self.reqs],
+            lora_paths=lora_paths,
             sampling_info=self.sampling_info,
             input_embeds=self.input_embeds,
             spec_algorithm=self.spec_algorithm,

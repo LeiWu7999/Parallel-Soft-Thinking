@@ -157,6 +157,13 @@ class ModelRunner:
                 "enable_deepep_moe": server_args.enable_deepep_moe,
                 "deepep_mode": server_args.deepep_mode,
                 "device": server_args.device,
+                # ==========
+                # start of parallel soft thinking
+                # ==========
+                "lora_mode": server_args.lora_mode,
+                # ==========
+                # end of parallel soft thinking
+                # ==========
                 "speculative_accept_threshold_single": server_args.speculative_accept_threshold_single,
                 "speculative_accept_threshold_acc": server_args.speculative_accept_threshold_acc,
                 "disable_radix_cache": server_args.disable_radix_cache,

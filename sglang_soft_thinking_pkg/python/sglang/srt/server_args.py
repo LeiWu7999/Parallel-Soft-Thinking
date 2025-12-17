@@ -122,6 +122,10 @@ class ServerArgs:
     lora_paths: Optional[List[str]] = None
     max_loras_per_batch: int = 8
     lora_backend: str = "triton"
+    # How LoRA is applied during inference.
+    # - "joint": always apply LoRA when lora_path is provided.
+    # - "split": apply LoRA only during soft-thinking decode steps.
+    lora_mode: str = "joint"
 
     # Kernel backend
     attention_backend: Optional[str] = None
@@ -840,6 +844,19 @@ class ServerArgs:
             default="triton",
             help="Choose the kernel backend for multi-LoRA serving.",
         )
+        # ==========
+        # start of parallel soft thinking
+        # ==========
+        parser.add_argument(
+            "--lora-mode",
+            type=str,
+            default=ServerArgs.lora_mode,
+            choices=["joint", "split"],
+            help='How LoRA is applied during inference. "joint" applies LoRA for all steps; "split" applies LoRA only during soft-thinking decode steps (prefill and non-soft-thinking decode use base).',
+        )
+        # ==========
+        # end of parallel soft thinking
+        # ==========
 
         # Kernel backend
         parser.add_argument(
@@ -1290,6 +1307,16 @@ class ServerArgs:
             return f"http://{self.host}:{self.port}"
 
     def check_server_args(self):
+        # ==========
+        # start of parallel soft thinking
+        # ==========
+        if self.lora_mode not in ("joint", "split"):
+            raise ValueError(
+                f"Invalid lora_mode: {self.lora_mode}. Supported: 'joint', 'split'."
+            )
+        # ==========
+        # end of parallel soft thinking
+        # ==========
         assert (
             self.tp_size % self.nnodes == 0
         ), "tp_size must be divisible by number of nodes"

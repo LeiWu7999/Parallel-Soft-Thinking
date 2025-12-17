@@ -131,14 +131,28 @@ class LoRAManager:
         self.memory_pool.init_buffers(self.lora_weight_names, self.base_model)
 
     def prepare_lora_batch(self, forward_batch: ForwardBatch):
-        # load active loras into lora memory pool
-        cur_uids = set(forward_batch.lora_paths)
-        assert len(cur_uids) <= self.max_loras_per_batch
-        self.memory_pool.prepare_lora_batch(cur_uids, self.loras)
+        # ==========
+        # start of parallel soft thinking
+        # ==========
+        # ForwardBatch.lora_paths contains the per-sequence LoRA uid (or None for base-only).
+        # We support mixed batches with both base-only and LoRA requests.
+        if forward_batch.lora_paths is None:
+            cur_uids = {None}
+        else:
+            cur_uids = set(forward_batch.lora_paths)
 
-        # FIXME: Handle lora uid with None more safely
-        if cur_uids == set([None]):
+        assert len(cur_uids) <= self.max_loras_per_batch
+
+        # If all sequences are base-only, disable LoRA for this batch to avoid
+        # extra kernel overhead and to prevent stale LoRA state across batches.
+        if cur_uids == {None}:
+            for _, modules in self.lora_modules.items():
+                for _, module in modules:
+                    module.set_lora = False
             return
+
+        # load active loras into lora memory pool
+        self.memory_pool.prepare_lora_batch(cur_uids, self.loras)
 
         # set up batch info shared by all lora moruldes
         bs = forward_batch.batch_size
@@ -152,17 +166,27 @@ class LoRAManager:
         max_len = int(torch.max(seg_lens))
         weight_indices = torch.empty((bs,), dtype=torch.int64, device=self.device)
 
-        lora_ranks = torch.empty(
-            (self.max_loras_per_batch,), dtype=torch.int64, device="cuda"
+        # Default: treat every slot as base-only (rank=1, scaling=0.0) unless overwritten.
+        # NOTE: rank must be >= 1 to avoid division-by-zero in LoRA-A kernels.
+        lora_ranks = torch.ones(
+            (self.max_loras_per_batch,), dtype=torch.int64, device=self.device
         )
-        scalings = torch.empty(
-            (self.max_loras_per_batch,), dtype=torch.float, device="cuda"
+        scalings = torch.zeros(
+            (self.max_loras_per_batch,), dtype=torch.float, device=self.device
         )
         for i, lora_path in enumerate(forward_batch.lora_paths):
-            weight_indices[i] = self.memory_pool.get_buffer_id(lora_path)
+            buffer_id = self.memory_pool.get_buffer_id(lora_path)
+            weight_indices[i] = buffer_id
+            if lora_path is None:
+                # Base-only request: keep rank=1 and scaling=0.0, and memory_pool
+                # ensures LoRA-A weights are zeroed for this uid.
+                continue
             lora = self.loras[lora_path]
-            lora_ranks[weight_indices[i]] = lora.config.hf_config["r"]
-            scalings[weight_indices[i]] = lora.scaling
+            lora_ranks[buffer_id] = lora.config.hf_config["r"]
+            scalings[buffer_id] = lora.scaling
+        # ==========
+        # end of parallel soft thinking
+        # ==========
 
         batch_info = LoRABatchInfo(
             bs=bs,

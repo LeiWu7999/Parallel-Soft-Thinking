@@ -19,6 +19,7 @@
 # https://github.com/vllm-project/vllm/blob/4abf6336ec65c270343eb895e7b18786e9274176/vllm/lora/layers.py
 
 import logging
+import os
 import re
 from typing import Dict, List
 
@@ -74,20 +75,64 @@ class LoRAAdapter(nn.Module):
     # initialize the LoRA weights to cpu
     def initialize_weights(self):
         model_path = self.config.path
-        loader = DefaultModelLoader(self.load_config)
-        revision = getattr(self.config.hf_config, "revision", None)
-        for name, loaded_weight in loader._get_weights_iterator(
-            DefaultModelLoader.Source(
-                model_path, revision=revision, fall_back_to_pt=True
-            )
-        ):
-            match = re.search(r"layers\.(\d+)\.", name)
-            if match is not None:
-                layer_id = int(match.group(1))
-                self.layers[layer_id].weights[name] = loaded_weight.cpu()
-            else:
-                self.weights[name] = loaded_weight.cpu()
+        # ==========
+        # start of parallel soft thinking
+        # ==========
+        loaded_from_state_pt = False
 
+        # Prefer local `lora_state.pt` if present (used by token-wise gated LoRA training).
+        if os.path.isdir(model_path):
+            lora_state_path = os.path.join(model_path, "lora_state.pt")
+            if os.path.isfile(lora_state_path):
+                try:
+                    state = torch.load(
+                        lora_state_path, map_location="cpu", weights_only=True
+                    )
+                    # logger.info("Read special lora state successful")
+                except TypeError:
+                    # logger.warning("Read special lora state weights only failed, try again")
+                    state = torch.load(lora_state_path, map_location="cpu")
+
+                if isinstance(state, dict) and isinstance(state.get("state_dict"), dict):
+                    state = state["state_dict"]
+                if not isinstance(state, dict):
+                    raise ValueError(
+                        f"Invalid LoRA checkpoint at {lora_state_path}: expected a state dict."
+                    )
+
+                for name, loaded_weight in state.items():
+                    if not isinstance(loaded_weight, torch.Tensor):
+                        continue
+                    match = re.search(r"layers\.(\d+)\.", name)
+                    if match is not None:
+                        layer_id = int(match.group(1))
+                        self.layers[layer_id].weights[name] = loaded_weight.cpu()
+                        # logger.info(f"layers {layer_id} Get lora weights:{name}")
+                    else:
+                        self.weights[name] = loaded_weight.cpu()
+                        # logger.info(f"Get unknown lora weights:{name}")
+                    
+
+                loaded_from_state_pt = True
+
+        if not loaded_from_state_pt:
+            loader = DefaultModelLoader(self.load_config)
+            revision = getattr(self.config.hf_config, "revision", None)
+            for name, loaded_weight in loader._get_weights_iterator(
+                DefaultModelLoader.Source(
+                    model_path, revision=revision, fall_back_to_pt=True
+                )
+            ):
+                match = re.search(r"layers\.(\d+)\.", name)
+                if match is not None:
+                    layer_id = int(match.group(1))
+                    self.layers[layer_id].weights[name] = loaded_weight.cpu()
+                else:
+                    self.weights[name] = loaded_weight.cpu()
+
+        # ==========
+        # end of parallel soft thinking
+        # ==========
         # stack kv_proj and gate_up_proj
         for i in range(self.base_hf_config.num_hidden_layers):
             layer = self.layers[i]

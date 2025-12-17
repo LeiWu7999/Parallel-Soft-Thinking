@@ -68,6 +68,27 @@ def main():
     parser.add_argument('--hf_token', type=str, default=None, help='')
     parser.add_argument('--hf_repo_id', type=str, default=None, help='')
 
+    # LoRA (optional)
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=None,
+        help="LoRA adapter path/ID, or in the format {name}={path}. For token-wise gated LoRA training, this directory should contain `lora_state.pt` and `lora_config.json`.",
+    )
+    parser.add_argument(
+        "--lora_mode",
+        type=str,
+        choices=["joint", "split"],
+        default="joint",
+        help='"joint": apply LoRA for all steps; "split": apply LoRA only during soft-thinking steps.',
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Tokenizer path override. If not set, defaults to lora adapter path (when provided) else model_name.",
+    )
+
     parser.add_argument("--enable_soft_thinking", action="store_true", help="Enable soft thinking mode")
     parser.add_argument("--think_end_str", type=str, default="</think>")
     parser.add_argument("--max_topk", type=int, default=15)
@@ -95,6 +116,16 @@ def main():
     start_idx = args.start_idx
     end_idx = args.end_idx
     reeval = args.reeval
+    lora_path = args.lora_path
+
+    lora_request_uid = None
+    lora_adapter_path_for_tokenizer = None
+    if lora_path is not None:
+        if "=" in lora_path:
+            lora_request_uid, lora_adapter_path_for_tokenizer = lora_path.split("=", 1)
+        else:
+            lora_request_uid = lora_path
+            lora_adapter_path_for_tokenizer = lora_path
 
 
     print(f"Arguments: {args}", flush=True)
@@ -178,7 +209,8 @@ Test Cases:
         return prompt
 
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer_path = args.tokenizer_path or lora_adapter_path_for_tokenizer or model_name
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     sampling_params = {"temperature": temperature, "top_p": top_p, "top_k": top_k, "min_p": min_p, "repetition_penalty": args.repetition_penalty,
                         "after_thinking_temperature": args.after_thinking_temperature, "after_thinking_top_p": args.after_thinking_top_p, "after_thinking_top_k": args.after_thinking_top_k, "after_thinking_min_p": args.after_thinking_min_p,
                         "n": 1, # repeat prompt for num_samples times instead of using num_samples in sampling_params
@@ -268,6 +300,7 @@ Test Cases:
             print(f"Number of GPUs available: {num_gpus}", flush=True)
             llm = sgl.Engine(
                 model_path=model_name,
+                tokenizer_path=tokenizer_path,
                 tp_size=num_gpus,
                 log_level="info",
                 trust_remote_code=True,
@@ -275,15 +308,22 @@ Test Cases:
                 max_running_requests=max_running_requests,
                 mem_fraction_static=mem_fraction_static,
                 disable_cuda_graph=True,
+                disable_radix_cache=(lora_path is not None),
                 disable_overlap_schedule=True,
                 enable_soft_thinking=args.enable_soft_thinking,
                 add_noise_dirichlet=args.add_noise_dirichlet,
                 add_noise_gumbel_softmax=args.add_noise_gumbel_softmax,
                 max_topk=args.max_topk,
                 cuda_graph_max_bs=args.cuda_graph_max_bs,
-                sampling_backend=args.sampling_backend
+                sampling_backend=args.sampling_backend,
+                lora_paths=([lora_path] if lora_path is not None else None),
+                lora_mode=args.lora_mode,
             )
-            outputs =  llm.generate(prompt_list[idx:idx+max_batch], sampling_params)
+            outputs = llm.generate(
+                prompt_list[idx : idx + max_batch],
+                sampling_params,
+                lora_path=(lora_request_uid if lora_request_uid is not None else None),
+            )
             decoded_text_list.extend([o["text"] for o in outputs])
             finish_generation_list.extend([o["meta_info"]["finish_reason"]["type"] == "stop" and not args.enable_soft_thinking for o in outputs])
 
