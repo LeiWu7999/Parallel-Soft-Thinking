@@ -4,7 +4,7 @@ export OPENAI_API_KEY=""
 
 python run_sglang_softthinking.py \
     --dataset "math500" \
-    --model_name "Qwen/Qwen2.5-0.5B-Instruct" \
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
     --max_topk 10 \
     --max_generated_tokens 4096 \
     --temperature 0.6 \
@@ -22,4 +22,4 @@ python run_sglang_softthinking.py \
     --end_idx 100000 \
     --num_gpus 2 \
     --num_samples 1 \
-    --enable_soft_thinking \
+    --enable_soft_thinking

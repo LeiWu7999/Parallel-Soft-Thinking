@@ -435,6 +435,7 @@ class Req:
         # ==========
     ):
         # Input and output info
+        # logger.info("init a request")
         self.rid = rid
         self.origin_input_text = origin_input_text
         self.origin_input_ids_unpadded = (
@@ -763,7 +764,7 @@ class Req:
         
         if self.sampling_params.soft_thinking_mode:
             # 如果当前是 soft thinking 模式
-            
+            # logger.info(f"Here is soft thinking!!!")
             should_exit = False
             
             if dynamic_enabled:
@@ -776,7 +777,7 @@ class Req:
                     should_exit = True
             
             # 无论哪种模式，都检查 think_end_str (兼容性)
-            if self.sampling_params.think_end_str_id is None:
+            if self.sampling_params.think_end_str_id is None and self.sampling_params.think_end_str is not None:
                 self.sampling_params.think_end_str_id = self.tokenizer.encode(self.sampling_params.think_end_str,add_special_tokens=False)[-1]
             
             if not should_exit:
@@ -789,15 +790,16 @@ class Req:
                     if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
                         print(f"Early stopping triggered", flush=True)
                         # trigger early stop, emit think_end_str token
-                        self.output_ids[-1] = self.sampling_params.think_end_str_id
+                        if self.sampling_params.think_end_str_id is not None:
+                            self.output_ids[-1] = self.sampling_params.think_end_str_id
+                            self.topk_idx[0] = self.sampling_params.think_end_str_id
                         self.topk_prob[1:].fill_(0)
                         self.topk_idx[1:].fill_(0)
                         self.topk_prob[0] = 1.0
-                        self.topk_idx[0] = self.sampling_params.think_end_str_id
                         self.low_entropy_steps = 0
                         should_exit = True
 
-            if self.sampling_params.think_end_str_id == self.output_ids[-1]:
+            if self.sampling_params.think_end_str_id is not None and self.sampling_params.think_end_str_id == self.output_ids[-1]:
                 should_exit = True
 
             if should_exit:
@@ -807,14 +809,15 @@ class Req:
                 self.topk_prob[1:].fill_(0)
                 self.topk_idx[1:].fill_(0)
                 self.topk_prob[0] = 1.0
-                # 注意: 这里应该使用 output_ids[-1]，如果早停触发了它已经被修改为 think_end_str
+                # 注意: 无论是否有think_end_str_id，这里都应该使用 output_ids[-1]，如果早停触发了它可能会被修改为 think_end_str
                 self.topk_idx[0] = self.output_ids[-1] 
+                # logger.info(f"self.topk_idx[0] == self.output_ids[-1] : {self.topk_idx[0] == self.output_ids[-1] }")
                 self.low_entropy_steps = 0
                 self.current_soft_thinking_steps = 0
                 
         else:
             # 当前是离散模式
-
+            # logger.info(f"Here is 离散 decode!!!")
             triggered = False
             if dynamic_enabled and (
                 self.trigger_count < self.sampling_params.max_soft_thinking_triggers
@@ -832,6 +835,7 @@ class Req:
                         triggered = True
 
                 if triggered:
+                    # logger.info("now start soft thinking!!!")
                     self.sampling_params.soft_thinking_mode = True
                     self.trigger_count += 1
                     self.current_soft_thinking_steps = 0

@@ -28,6 +28,7 @@ TP_SIZE=2                    # tensor parallel 张数（--num_gpus）
 MEM_FRACTION_STATIC=0.8      # 每张卡可用显存比例（--mem_fraction_static）
 START_IDX=0                  # 数据集起始样本下标（--start_idx）
 END_IDX=100000               # 数据集结束样本下标（--end_idx）
+MAX_BATCH=1000000
 NUM_SAMPLES=1                # 每个样本采样次数（--num_samples）
 
 # ===== 生成/采样参数 =====
@@ -76,7 +77,7 @@ args=(
 
   # ===== soft-thinking 开关与控制 =====
   --max_topk "${MAX_TOPK}"               # soft token top-k 大小
-  --think_end_str "${THINK_END_STR}"     # soft-thinking 结束 token 字符串
+#   --think_end_str "${THINK_END_STR}"     # soft-thinking 结束 token 字符串
   --enable_soft_thinking                 # 开启 soft-thinking 推理
   --soft_thinking_trigger_entropy "${SOFT_THINK_TRIGGER_ENTROPY}"
   --soft_thinking_steps "${SOFT_THINKING_STEPS}"
@@ -108,6 +109,7 @@ args=(
   --start_idx "${START_IDX}"
   --end_idx "${END_IDX}"
   --num_samples "${NUM_SAMPLES}"
+  --max_batch "${MAX_BATCH}"
 )
 
 python run_sglang_softthinking.py "${args[@]}"

@@ -90,7 +90,8 @@ def main():
     )
 
     parser.add_argument("--enable_soft_thinking", action="store_true", help="Enable soft thinking mode")
-    parser.add_argument("--think_end_str", type=str, default="</think>")
+    # parser.add_argument("--think_end_str", type=str, default="</think>")
+    parser.add_argument("--think_end_str", type=str, default=None)
     parser.add_argument("--max_topk", type=int, default=15)
     parser.add_argument("--soft_thinking_trigger_entropy", type=float, default=-1.0, help="Entropy threshold to trigger soft thinking mode dynamically.")
     parser.add_argument("--soft_thinking_steps", type=int, default=1, help="Number of steps to stay in soft thinking mode after triggered.")
@@ -351,7 +352,7 @@ Test Cases:
 
     # evaluate results
     for i,idx in enumerate(idx_list):
-        print(idx, flush=True)
+        # print(idx, flush=True)
         sample = samples[idx]
         judge_info = []
         passat1_list = []
