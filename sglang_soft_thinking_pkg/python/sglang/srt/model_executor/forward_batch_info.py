@@ -170,6 +170,17 @@ class ForwardBatch:
 
     # Position information
     positions: torch.Tensor = None
+    # ==========
+    # begin of parallel soft thinking
+    # ==========
+    # Soft-thinking: position rollback (physical_pos - logical_pos) for decode steps.
+    pos_offsets: Optional[torch.Tensor] = None
+    # Soft-thinking: KV masking ranges (inclusive physical positions), decode only.
+    kv_mask_starts: Optional[torch.Tensor] = None
+    kv_mask_ends: Optional[torch.Tensor] = None
+    # ==========
+    # end of parallel soft thinking
+    # ==========
 
     # For extend
     extend_num_tokens: Optional[int] = None
@@ -300,6 +311,15 @@ class ForwardBatch:
             input_embeds=batch.input_embeds,
             extend_input_logprob_token_ids_gpu=extend_input_logprob_token_ids_gpu,
             # ==========
+            # begin of parallel soft thinking
+            # ==========
+            pos_offsets=batch.pos_offsets,
+            kv_mask_starts=getattr(batch, "kv_mask_starts", None),
+            kv_mask_ends=getattr(batch, "kv_mask_ends", None),
+            # ==========
+            # end of parallel soft thinking
+            # ==========
+            # ==========
             # begin of soft thinking
             # ==========
             topk_probs=batch.topk_probs,
@@ -345,7 +365,18 @@ class ForwardBatch:
         # Init position information
         if ret.forward_mode.is_decode():
             if ret.positions is None:
-                ret.positions = clamp_position(batch.seq_lens)
+                # ==========
+                # begin of parallel soft thinking
+                # ==========
+                # 偏移位置编码
+                positions = clamp_position(batch.seq_lens)
+                if getattr(batch, "pos_offsets", None) is not None:
+                    pos_offsets = batch.pos_offsets.to(device, non_blocking=True)
+                    positions = torch.clamp(positions - pos_offsets, min=0)
+                ret.positions = positions
+                # ==========
+                # end of parallel soft thinking
+                # ==========
         else:
             ret.extend_seq_lens = torch.tensor(
                 batch.extend_seq_lens, dtype=torch.int32

@@ -621,6 +621,29 @@ class Req:
             # New fields for dynamic triggering
             self.trigger_count = 0
             self.current_soft_thinking_steps = 0
+
+            # ==========
+            # begin of parallel soft thinking
+            # ==========
+            # All positions here are *physical* positions in the sequence (including prompt),
+            # i.e. the indices used by req_to_token / KV cache.
+            self.st_entry_pos: Optional[int] = None
+            self.st_entry_token_id: Optional[int] = None
+            self.st_soft_end_pos: Optional[int] = None
+            # When a soft segment ends, the next discrete token will be replaced
+            # by st_entry_token_id, and the following decode step becomes the
+            # "insertion forward" (can see soft tokens but not st_entry_pos).
+            self.st_pending_replace: bool = False
+            self.st_pending_insertion_forward: bool = False
+            self.st_inflight_insertion_forward: bool = False
+            # Persistent masked ranges: tokens in these ranges are invisible to all future tokens.
+            # Each element is an inclusive (start_pos, end_pos).
+            self.st_mask_ranges: List[Tuple[int, int]] = []
+            # Position encoding rollback accumulator (physical_pos - logical_pos).
+            self.pos_offset: int = 0
+            # ==========
+            # end of parallel soft thinking
+            # ==========
         # ==========
         # end of soft thinking
         # ==========
@@ -753,6 +776,15 @@ class Req:
         self.entropy = logits_output.entropy[index]
         # last_token_id = self.output_ids[-1]
 
+        # ==========
+        # begin of parallel soft thinking
+        # ==========
+        # Physical position of the latest sampled token (including prompt).
+        cur_pos = self.seqlen - 1
+        # ==========
+        # end of parallel soft thinking
+        # ==========
+
         # Dynamic Soft Thinking Logic
         # 1) 熵触发：soft_thinking_trigger_entropy > 0
         # 2) 随机触发：random_think_prob > 0
@@ -765,6 +797,15 @@ class Req:
         if self.sampling_params.soft_thinking_mode:
             # 如果当前是 soft thinking 模式
             # logger.info(f"Here is soft thinking!!!")
+            # ==========
+            # begin of parallel soft thinking
+            # ==========
+            if self.st_entry_pos is not None:
+                # Track the last soft token position for this segment.
+                self.st_soft_end_pos = cur_pos
+            # ==========
+            # end of parallel soft thinking
+            # ==========
             should_exit = False
             
             if dynamic_enabled:
@@ -803,6 +844,7 @@ class Req:
                 should_exit = True
 
             if should_exit:
+                # logger.info(f"[{cur_pos}]exit soft think!!!")
                 # 退出 soft thinking 模式并将 topk 设置为 one-hot
                 self.sampling_params.soft_thinking_mode = False
                 # 一键清零再设置 head (使用当前输出的 token)
@@ -814,14 +856,36 @@ class Req:
                 # logger.info(f"self.topk_idx[0] == self.output_ids[-1] : {self.topk_idx[0] == self.output_ids[-1] }")
                 self.low_entropy_steps = 0
                 self.current_soft_thinking_steps = 0
+                # ==========
+                # begin of parallel soft thinking
+                # ==========
+                # Mark that we need to replace the next discrete token and run the
+                # insertion forward (only for dynamically-triggered segments).
+                if self.st_entry_pos is not None and self.st_entry_token_id is not None:
+                    self.st_pending_replace = True
+                # ==========
+                # end of parallel soft thinking
+                # ==========
                 
         else:
             # 当前是离散模式
             # logger.info(f"Here is 离散 decode!!!")
             triggered = False
-            if dynamic_enabled and (
+            # ==========
+            # begin of parallel soft thinking
+            # ==========
+            suppress_trigger = (
+                getattr(self, "st_pending_insertion_forward", False)
+                or getattr(self, "st_pending_replace", False)
+                or getattr(self, "st_inflight_insertion_forward", False)
+            )
+
+            if (not suppress_trigger) and dynamic_enabled and (
                 self.trigger_count < self.sampling_params.max_soft_thinking_triggers
             ):
+                # ==========
+                # end of parallel soft thinking
+                # ==========
                 # 1) 熵触发策略
                 if dynamic_entropy_enabled and (
                     self.entropy
@@ -841,6 +905,14 @@ class Req:
                     self.current_soft_thinking_steps = 0
                     # 保留 topk_prob/idx 为 dense 分布，作为下一轮的输入
                     # 不要清零！
+
+                    # Record entry bookkeeping for KV masking / position rollback.
+                    self.st_entry_pos = cur_pos
+                    self.st_entry_token_id = self.output_ids[-1]
+                    self.st_soft_end_pos = cur_pos
+                    self.st_pending_replace = False
+                    self.st_pending_insertion_forward = False
+                    self.st_inflight_insertion_forward = False
             
             if not triggered:
                 # 保持离散模式，手动坍缩 topk 为 one-hot
@@ -1761,8 +1833,64 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # end of soft thinking
         # ==========
         # ==========
-        # start of parallel soft thinking
+        # begin of parallel soft thinking
         # ==========
+
+        # Soft-thinking: position rollback + KV masking info (decode only).
+        pos_offsets = None
+        kv_mask_starts = None
+        kv_mask_ends = None
+        if self.model_config.enable_soft_thinking and self.forward_mode.is_decode():
+            if any(getattr(req, "pos_offset", 0) != 0 for req in self.reqs):
+                pos_offsets = torch.tensor(
+                    [req.pos_offset for req in self.reqs],
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+
+            # Max number of masked ranges per request.
+            # Each completed soft-thinking trigger contributes exactly one persistent range
+            # [entry_pos, soft_end_pos], so setting this to max_soft_thinking_triggers is enough
+            # to avoid dropping any masked soft tokens.
+            max_kv_mask_ranges = max(
+                1,
+                max(
+                    getattr(req.sampling_params, "max_soft_thinking_triggers", 0)
+                    for req in self.reqs
+                ),
+            )
+            kv_mask_rows_start = []
+            kv_mask_rows_end = []
+            need_kv_mask = False
+            for req in self.reqs:
+                ranges = list(getattr(req, "st_mask_ranges", []))
+
+                # For the insertion forward (one step only), temporarily mask the
+                # original entry token position, but keep soft tokens visible.
+                if getattr(req, "st_pending_insertion_forward", False):
+                    req.st_pending_insertion_forward = False
+                    req.st_inflight_insertion_forward = True
+                    entry_pos = getattr(req, "st_entry_pos", None)
+                    if entry_pos is not None:
+                        ranges.append((entry_pos, entry_pos))
+
+                row_start = [-1] * max_kv_mask_ranges
+                row_end = [-1] * max_kv_mask_ranges
+                for j, (s, e) in enumerate(ranges[:max_kv_mask_ranges]):
+                    row_start[j] = int(s)
+                    row_end[j] = int(e)
+                    need_kv_mask = True
+                kv_mask_rows_start.append(row_start)
+                kv_mask_rows_end.append(row_end)
+
+            if need_kv_mask:
+                kv_mask_starts = torch.tensor(
+                    kv_mask_rows_start, dtype=torch.int32, device=self.device
+                )
+                kv_mask_ends = torch.tensor(
+                    kv_mask_rows_end, dtype=torch.int32, device=self.device
+                )
+
         # LoRA routing
         # - joint: always use req.lora_path
         # - split: only enable LoRA during soft-thinking steps. Prefill/extend
@@ -1836,6 +1964,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # ==========
             topk_probs=topk_probs,
             topk_indices=topk_indices,
+            pos_offsets=pos_offsets,
+            # ==========
+            # begin of parallel soft thinking
+            # ==========
+            kv_mask_starts=kv_mask_starts,
+            kv_mask_ends=kv_mask_ends,
+            # ==========
+            # end of parallel soft thinking
+            # ==========
             # ==========
             # end of soft thinking
             # ==========
@@ -1946,6 +2083,16 @@ class ModelWorkerBatch:
     # For soft thinking mode
     topk_probs: Optional[torch.Tensor] = None
     topk_indices: Optional[torch.Tensor] = None
+    # ==========
+    # begin of parallel soft thinking
+    # ==========
+    # Soft-thinking: position rollback + KV masking info (decode only).
+    pos_offsets: Optional[torch.Tensor] = None
+    kv_mask_starts: Optional[torch.Tensor] = None
+    kv_mask_ends: Optional[torch.Tensor] = None
+    # ==========
+    # end of parallel soft thinking
+    # ==========
     # ==========
     # end of soft thinking
     # ==========

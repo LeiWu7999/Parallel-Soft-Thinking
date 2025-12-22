@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
+import torch
+
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import (
@@ -20,6 +22,8 @@ if TYPE_CHECKING:
         Scheduler,
     )
 
+import logging
+logger = logging.getLogger(__name__)
 
 class SchedulerOutputProcessorMixin:
     """
@@ -241,9 +245,66 @@ class SchedulerOutputProcessorMixin:
                         )
                 continue
 
+            # ==========
+            # begin of parallel soft thinking (KV masking + token replacement)
+            # ==========
+            if self.enable_soft_thinking and batch.spec_algorithm.is_none():
+                # If the previous step was the insertion forward, finalize the persistent
+                # KV mask ranges now (so the next token cannot see soft tokens).
+                if getattr(req, "st_inflight_insertion_forward", False):
+                    entry_pos = getattr(req, "st_entry_pos", None)
+                    soft_end_pos = getattr(req, "st_soft_end_pos", None)
+                    if (
+                        entry_pos is not None
+                        and soft_end_pos is not None
+                        and entry_pos <= soft_end_pos
+                    ):
+                        req.st_mask_ranges.append((entry_pos, soft_end_pos))
+                        logger.info(f"finish see the soft token position: {(entry_pos, soft_end_pos)}!!!")
+
+                    req.st_inflight_insertion_forward = False
+                    req.st_entry_pos = None
+                    req.st_entry_token_id = None
+                    req.st_soft_end_pos = None
+                    req.st_pending_replace = False
+                    req.st_pending_insertion_forward = False
+
+                # When soft thinking ends, replace the next discrete token by the
+                # entry discrete token, and roll back position encoding.
+                final_token_id = next_token_id
+                if getattr(req, "st_pending_replace", False):
+                    entry_token_id = getattr(req, "st_entry_token_id", None)
+                    entry_pos = getattr(req, "st_entry_pos", None)
+                    soft_end_pos = getattr(req, "st_soft_end_pos", None)
+                    if (
+                        entry_token_id is not None
+                        and entry_pos is not None
+                        and soft_end_pos is not None
+                    ):
+                        logger.info(f"replace this token with high entropy position {entry_pos}!!!")
+                        final_token_id = int(entry_token_id)
+                        # 处理位置编码偏移
+                        req.pos_offset += (soft_end_pos - entry_pos) + 1
+                        req.st_pending_replace = False
+                        req.st_pending_insertion_forward = True
+                    else:
+                        req.st_pending_replace = False
+            else:
+                final_token_id = next_token_id
+
             if batch.spec_algorithm.is_none():
                 # speculative worker will solve the output_ids in speculative decoding
-                req.output_ids.append(next_token_id)
+                req.output_ids.append(final_token_id)
+                if (
+                    self.enable_soft_thinking
+                    and batch.spec_algorithm.is_none()
+                    and final_token_id != next_token_id
+                    and isinstance(getattr(batch, "output_ids", None), torch.Tensor)
+                ):
+                    batch.output_ids[i] = int(final_token_id)
+            # ==========
+            # end of soft thinking (KV masking + token replacement)
+            # ==========
 
             req.check_finished()
 
@@ -253,7 +314,7 @@ class SchedulerOutputProcessorMixin:
             if req.return_logprob and batch.spec_algorithm.is_none():
                 # speculative worker handles logprob in speculative decoding
                 req.output_token_logprobs_val.append(next_token_logprobs[i])
-                req.output_token_logprobs_idx.append(next_token_id)
+                req.output_token_logprobs_idx.append(final_token_id)
                 if req.top_logprobs_num > 0:
                     req.output_top_logprobs_val.append(
                         logits_output.next_token_top_logprobs_val[i]
@@ -275,7 +336,7 @@ class SchedulerOutputProcessorMixin:
                 )
 
             if req.grammar is not None and batch.spec_algorithm.is_none():
-                req.grammar.accept_token(next_token_id)
+                req.grammar.accept_token(final_token_id)
                 req.grammar.finished = req.finished()
 
 

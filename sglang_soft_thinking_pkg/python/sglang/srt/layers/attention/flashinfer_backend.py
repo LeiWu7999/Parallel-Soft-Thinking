@@ -17,7 +17,11 @@ import torch
 
 from sglang.global_config import global_config
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
+from sglang.srt.layers.attention.utils import (
+    compute_masked_kv_lens_triton,
+    create_flashinfer_kv_indices_masked_triton,
+    create_flashinfer_kv_indices_triton,
+)
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
@@ -198,6 +202,8 @@ class FlashInferAttnBackend(AttentionBackend):
                 decode_wrappers=self.decode_wrappers,
                 encoder_lens=forward_batch.encoder_lens,
                 spec_info=forward_batch.spec_info,
+                kv_mask_starts=getattr(forward_batch, "kv_mask_starts", None),
+                kv_mask_ends=getattr(forward_batch, "kv_mask_ends", None),
             )
             self.forward_metadata = DecodeMetadata(self.decode_wrappers)
         elif forward_batch.forward_mode.is_draft_extend():
@@ -544,6 +550,8 @@ class FlashInferIndicesUpdaterDecode:
         decode_wrappers: List[BatchDecodeWithPagedKVCacheWrapper],
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        kv_mask_starts: Optional[torch.Tensor] = None,
+        kv_mask_ends: Optional[torch.Tensor] = None,
     ):
         # Keep the signature for type checking. It will be assigned during runtime.
         raise NotImplementedError()
@@ -556,6 +564,8 @@ class FlashInferIndicesUpdaterDecode:
         decode_wrappers: List[BatchDecodeWithPagedKVCacheWrapper],
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        kv_mask_starts: Optional[torch.Tensor] = None,
+        kv_mask_ends: Optional[torch.Tensor] = None,
     ):
         decode_wrappers = decode_wrappers or self.decode_wrappers
         self.call_begin_forward(
@@ -566,6 +576,8 @@ class FlashInferIndicesUpdaterDecode:
             self.kv_indptr[0],
             None,
             spec_info,
+            kv_mask_starts,
+            kv_mask_ends,
         )
 
     def update_sliding_window(
@@ -576,6 +588,8 @@ class FlashInferIndicesUpdaterDecode:
         decode_wrappers: List[BatchDecodeWithPagedKVCacheWrapper],
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        kv_mask_starts: Optional[torch.Tensor] = None,
+        kv_mask_ends: Optional[torch.Tensor] = None,
     ):
         for wrapper_id in range(2):
             if wrapper_id == 0:
@@ -600,6 +614,8 @@ class FlashInferIndicesUpdaterDecode:
                 self.kv_indptr[wrapper_id],
                 kv_start_idx_tmp,
                 spec_info,
+                kv_mask_starts,
+                kv_mask_ends,
             )
 
     def update_cross_attention(
@@ -610,6 +626,8 @@ class FlashInferIndicesUpdaterDecode:
         decode_wrappers: List[BatchDecodeWithPagedKVCacheWrapper],
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        kv_mask_starts: Optional[torch.Tensor] = None,
+        kv_mask_ends: Optional[torch.Tensor] = None,
     ):
         for wrapper_id in range(2):
             if wrapper_id == 0:
@@ -630,6 +648,8 @@ class FlashInferIndicesUpdaterDecode:
                 self.kv_indptr[wrapper_id],
                 kv_start_idx,
                 spec_info,
+                kv_mask_starts if wrapper_id == 0 else None,
+                kv_mask_ends if wrapper_id == 0 else None,
             )
 
     def call_begin_forward(
@@ -641,29 +661,66 @@ class FlashInferIndicesUpdaterDecode:
         kv_indptr: torch.Tensor,
         kv_start_idx: torch.Tensor,
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        kv_mask_starts: Optional[torch.Tensor] = None,
+        kv_mask_ends: Optional[torch.Tensor] = None,
     ):
         if spec_info is None:
             bs = len(req_pool_indices)
-            kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
-            kv_indptr = kv_indptr[: bs + 1]
-
-            if wrapper.is_cuda_graph_enabled:
-                # Directly write to the cuda graph input buffer
-                kv_indices = wrapper._paged_kv_indices_buf
-            else:
-                kv_indices = torch.empty(
-                    paged_kernel_lens_sum, dtype=torch.int32, device="cuda"
+            use_kv_mask = kv_mask_starts is not None and kv_mask_ends is not None
+            if use_kv_mask:
+                kv_lens = torch.empty((bs,), dtype=torch.int32, device="cuda")
+                compute_masked_kv_lens_triton[(bs,)](
+                    paged_kernel_lens,
+                    kv_start_idx,
+                    kv_mask_starts,
+                    kv_mask_ends,
+                    kv_lens,
+                    kv_mask_starts.stride(0),
+                    MAX_MASK_RANGES=kv_mask_starts.shape[1],
                 )
+                kv_indptr[1 : bs + 1] = torch.cumsum(kv_lens, dim=0)
+                kv_indptr = kv_indptr[: bs + 1]
+                kv_len_sum = int(kv_indptr[bs].item())
 
-            create_flashinfer_kv_indices_triton[(bs,)](
-                self.req_to_token,
-                req_pool_indices,
-                paged_kernel_lens,
-                kv_indptr,
-                kv_start_idx,
-                kv_indices,
-                self.req_to_token.shape[1],
-            )
+                if wrapper.is_cuda_graph_enabled:
+                    kv_indices = wrapper._paged_kv_indices_buf
+                else:
+                    kv_indices = torch.empty(kv_len_sum, dtype=torch.int32, device="cuda")
+
+                create_flashinfer_kv_indices_masked_triton[(bs,)](
+                    self.req_to_token,
+                    req_pool_indices,
+                    paged_kernel_lens,
+                    kv_indptr,
+                    kv_start_idx,
+                    kv_mask_starts,
+                    kv_mask_ends,
+                    kv_indices,
+                    self.req_to_token.shape[1],
+                    kv_mask_starts.stride(0),
+                    MAX_MASK_RANGES=kv_mask_starts.shape[1],
+                )
+            else:
+                kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
+                kv_indptr = kv_indptr[: bs + 1]
+
+                if wrapper.is_cuda_graph_enabled:
+                    # Directly write to the cuda graph input buffer
+                    kv_indices = wrapper._paged_kv_indices_buf
+                else:
+                    kv_indices = torch.empty(
+                        paged_kernel_lens_sum, dtype=torch.int32, device="cuda"
+                    )
+
+                create_flashinfer_kv_indices_triton[(bs,)](
+                    self.req_to_token,
+                    req_pool_indices,
+                    paged_kernel_lens,
+                    kv_indptr,
+                    kv_start_idx,
+                    kv_indices,
+                    self.req_to_token.shape[1],
+                )
         else:
             kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
             bs = kv_indptr.shape[0] - 1

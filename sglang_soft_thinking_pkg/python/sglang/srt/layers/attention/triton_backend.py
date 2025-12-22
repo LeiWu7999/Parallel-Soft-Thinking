@@ -8,7 +8,11 @@ import triton
 import triton.language as tl
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
+from sglang.srt.layers.attention.utils import (
+    compute_masked_kv_lens_triton,
+    create_flashinfer_kv_indices_masked_triton,
+    create_flashinfer_kv_indices_triton,
+)
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -191,20 +195,55 @@ class TritonAttnBackend(AttentionBackend):
 
         if forward_batch.forward_mode.is_decode_or_idle():
             if spec_info is None:
-                kv_indptr[1 : bs + 1] = torch.cumsum(forward_batch.seq_lens, dim=0)
-                kv_indptr = kv_indptr[: bs + 1]
-                kv_indices = torch.empty(
-                    forward_batch.seq_lens_sum, dtype=torch.int32, device=self.device
-                )
-                create_flashinfer_kv_indices_triton[(bs,)](
-                    self.req_to_token,
-                    forward_batch.req_pool_indices,
-                    forward_batch.seq_lens,
-                    kv_indptr,
-                    None,
-                    kv_indices,
-                    self.req_to_token.stride(0),
-                )
+                kv_mask_starts = getattr(forward_batch, "kv_mask_starts", None)
+                kv_mask_ends = getattr(forward_batch, "kv_mask_ends", None)
+                use_kv_mask = kv_mask_starts is not None and kv_mask_ends is not None
+
+                if use_kv_mask:
+                    kv_lens = torch.empty((bs,), dtype=torch.int32, device=self.device)
+                    compute_masked_kv_lens_triton[(bs,)](
+                        forward_batch.seq_lens,
+                        None,
+                        kv_mask_starts,
+                        kv_mask_ends,
+                        kv_lens,
+                        kv_mask_starts.stride(0),
+                        MAX_MASK_RANGES=kv_mask_starts.shape[1],
+                    )
+                    kv_indptr[1 : bs + 1] = torch.cumsum(kv_lens, dim=0)
+                    kv_indptr = kv_indptr[: bs + 1]
+                    kv_len_sum = int(kv_indptr[bs].item())
+                    kv_indices = torch.empty(
+                        kv_len_sum, dtype=torch.int32, device=self.device
+                    )
+                    create_flashinfer_kv_indices_masked_triton[(bs,)](
+                        self.req_to_token,
+                        forward_batch.req_pool_indices,
+                        forward_batch.seq_lens,
+                        kv_indptr,
+                        None,
+                        kv_mask_starts,
+                        kv_mask_ends,
+                        kv_indices,
+                        self.req_to_token.stride(0),
+                        kv_mask_starts.stride(0),
+                        MAX_MASK_RANGES=kv_mask_starts.shape[1],
+                    )
+                else:
+                    kv_indptr[1 : bs + 1] = torch.cumsum(forward_batch.seq_lens, dim=0)
+                    kv_indptr = kv_indptr[: bs + 1]
+                    kv_indices = torch.empty(
+                        forward_batch.seq_lens_sum, dtype=torch.int32, device=self.device
+                    )
+                    create_flashinfer_kv_indices_triton[(bs,)](
+                        self.req_to_token,
+                        forward_batch.req_pool_indices,
+                        forward_batch.seq_lens,
+                        kv_indptr,
+                        None,
+                        kv_indices,
+                        self.req_to_token.stride(0),
+                    )
             else:
                 kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
                 bs = kv_indptr.shape[0] - 1
