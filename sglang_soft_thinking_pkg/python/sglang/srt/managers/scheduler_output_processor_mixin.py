@@ -248,30 +248,126 @@ class SchedulerOutputProcessorMixin:
             # ==========
             # begin of parallel soft thinking (KV masking + token replacement)
             # ==========
+            finalize_st_mask = False
             if self.enable_soft_thinking and batch.spec_algorithm.is_none():
-                # If the previous step was the insertion forward, finalize the persistent
-                # KV mask ranges now (so the next token cannot see soft tokens).
-                if getattr(req, "st_inflight_insertion_forward", False):
-                    entry_pos = getattr(req, "st_entry_pos", None)
-                    soft_end_pos = getattr(req, "st_soft_end_pos", None)
-                    if (
-                        entry_pos is not None
-                        and soft_end_pos is not None
-                        and entry_pos <= soft_end_pos
-                    ):
-                        req.st_mask_ranges.append((entry_pos, soft_end_pos))
-                        logger.info(f"finish see the soft token position: {(entry_pos, soft_end_pos)}!!!")
+                # If the current step is the insertion forward, we will finalize the
+                # persistent KV mask after update_topk_info so that this step is
+                # always suppressed from re-triggering soft thinking.
+                finalize_st_mask = bool(
+                    getattr(req, "st_inflight_insertion_forward", False)
+                )
 
-                    req.st_inflight_insertion_forward = False
-                    req.st_entry_pos = None
-                    req.st_entry_token_id = None
-                    req.st_soft_end_pos = None
-                    req.st_pending_replace = False
-                    req.st_pending_insertion_forward = False
+                # Entropy-compare decoding on the insertion-forward step:
+                # compare the original entry-step logits entropy vs the insertion-forward entropy,
+                # and decode using the lower-entropy distribution.
+                final_token_id = next_token_id
+                if finalize_st_mask:
+                    req.st_selected_full_logits = None
+                    entry_entropy = getattr(req, "st_entry_entropy", None)
+                    entry_logits = getattr(req, "st_entry_full_logits", None)
+                    entry_topk_prob = getattr(req, "st_entry_topk_prob", None)
+                    entry_topk_idx = getattr(req, "st_entry_topk_idx", None)
+                    ins_entropy = None
+                    if getattr(logits_output, "entropy", None) is not None:
+                        ins_entropy = float(logits_output.entropy[i])
+
+                    ins_logits = None
+                    ins_logits = (
+                        logits_output.next_token_logits[i]
+                        .detach()
+                        .cpu()
+                        .clone()
+                    )
+                    req.st_insertion_full_logits = ins_logits
+
+                    # Decide which distribution to trust (prefer lower entropy).
+                    use_entry = False
+                    if entry_logits is not None and entry_entropy is not None:
+                        if ins_entropy is None or ins_logits is None:
+                            use_entry = True
+                        elif entry_entropy <= ins_entropy:
+                            use_entry = True
+
+                    chosen_logits = entry_logits if use_entry else ins_logits
+                    chosen_entropy = entry_entropy if use_entry else ins_entropy
+
+                    if chosen_logits is not None:
+                        probs = chosen_logits.float().clamp(min=0)
+                        denom = float(probs.sum())
+                        if denom > 0:
+                            probs = probs / denom
+                        final_token_id = int(
+                            torch.multinomial(probs, num_samples=1).item()
+                        )
+
+                        # Persist selected logits for bookkeeping.
+                        req.st_selected_full_logits = probs.cpu().clone()
+
+                        # Feed chosen distribution back for downstream processing.
+                        logits_output.next_token_logits[i] = probs.to(
+                            device=logits_output.next_token_logits.device,
+                            dtype=logits_output.next_token_logits.dtype,
+                        )
+
+                        if getattr(logits_output, "entropy", None) is not None:
+                            if chosen_entropy is not None:
+                                logits_output.entropy[i] = float(chosen_entropy)
+                            else:
+                                logits_output.entropy[i] = float(
+                                    -torch.sum(
+                                        probs * probs.clamp(min=1e-12).log()
+                                    ).item()
+                                )
+
+                        # Update top-k snapshot so update_topk_info sees the chosen logits.
+                        topk_prob_tensor = None
+                        topk_idx_tensor = None
+                        if (
+                            use_entry
+                            and entry_topk_prob is not None
+                            and entry_topk_idx is not None
+                        ):
+                            topk_prob_tensor = entry_topk_prob
+                            topk_idx_tensor = entry_topk_idx
+                        elif getattr(logits_output, "topk_probs", None) is not None:
+                            topk = min(
+                                logits_output.topk_probs.shape[1], probs.numel()
+                            )
+                            topk_prob_tensor, topk_idx_tensor = torch.topk(
+                                probs, k=topk
+                            )
+
+                        if (
+                            getattr(logits_output, "topk_probs", None) is not None
+                            and topk_prob_tensor is not None
+                        ):
+                            logits_output.topk_probs[i].copy_(
+                                topk_prob_tensor.to(
+                                    device=logits_output.topk_probs.device,
+                                    dtype=logits_output.topk_probs.dtype,
+                                )
+                            )
+                        if (
+                            getattr(logits_output, "topk_indices", None) is not None
+                            and topk_idx_tensor is not None
+                        ):
+                            logits_output.topk_indices[i].copy_(
+                                topk_idx_tensor.to(
+                                    device=logits_output.topk_indices.device
+                                )
+                            )
+
+                        if getattr(logits_output, "next_token_logprobs", None) is not None:
+                            logprob_val = float(
+                                torch.log(
+                                    probs[final_token_id].clamp(min=1e-12)
+                                ).item()
+                            )
+                            logits_output.next_token_logprobs[i] = logprob_val
+                            next_token_logprobs[i] = logprob_val
 
                 # When soft thinking ends, replace the next discrete token by the
                 # entry discrete token, and roll back position encoding.
-                final_token_id = next_token_id
                 if getattr(req, "st_pending_replace", False):
                     entry_token_id = getattr(req, "st_entry_token_id", None)
                     entry_pos = getattr(req, "st_entry_pos", None)
@@ -281,7 +377,9 @@ class SchedulerOutputProcessorMixin:
                         and entry_pos is not None
                         and soft_end_pos is not None
                     ):
-                        logger.info(f"replace this token with high entropy position {entry_pos}!!!")
+                        logger.info(
+                            f"replace this token with high entropy position {entry_pos}!!!"
+                        )
                         final_token_id = int(entry_token_id)
                         # 处理位置编码偏移
                         req.pos_offset += (soft_end_pos - entry_pos) + 1
@@ -303,7 +401,7 @@ class SchedulerOutputProcessorMixin:
                 ):
                     batch.output_ids[i] = int(final_token_id)
             # ==========
-            # end of soft thinking (KV masking + token replacement)
+            # end of parallel soft thinking (KV masking + token replacement)
             # ==========
 
             req.check_finished()
@@ -353,9 +451,38 @@ class SchedulerOutputProcessorMixin:
                     )
                 # 仅在 decode 阶段记录熵到全局统计
                 entropy_list_global.append(float(req.entropy))
-            # ==========
-            # end of soft thinking
-            # ==========
+
+                # Finalize persistent KV mask ranges after insertion forward so that
+                # update_topk_info can see st_inflight_insertion_forward=True and suppress
+                # dynamic triggering on this step.
+                if finalize_st_mask:
+                    entry_pos = getattr(req, "st_entry_pos", None)
+                    soft_end_pos = getattr(req, "st_soft_end_pos", None)
+                    if (
+                        entry_pos is not None
+                        and soft_end_pos is not None
+                        and entry_pos <= soft_end_pos
+                    ):
+                        req.st_mask_ranges.append((entry_pos, soft_end_pos))
+                        logger.info(
+                            f"finish see the soft token position: {(entry_pos, soft_end_pos)}!!!"
+                        )
+
+                    req.st_inflight_insertion_forward = False
+                    req.st_entry_pos = None
+                    req.st_entry_token_id = None
+                    req.st_entry_entropy = None
+                    req.st_entry_full_logits = None
+                    req.st_entry_topk_prob = None
+                    req.st_entry_topk_idx = None
+                    req.st_insertion_full_logits = None
+                    req.st_selected_full_logits = None
+                    req.st_soft_end_pos = None
+                    req.st_pending_replace = False
+                    req.st_pending_insertion_forward = False
+                # ==========
+                # end of soft thinking
+                # ==========
         
         if batch.next_batch_sampling_info:
             batch.next_batch_sampling_info.update_regex_vocab_mask()

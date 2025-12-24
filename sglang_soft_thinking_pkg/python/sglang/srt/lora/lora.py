@@ -19,6 +19,7 @@
 # https://github.com/vllm-project/vllm/blob/4abf6336ec65c270343eb895e7b18786e9274176/vllm/lora/layers.py
 
 import logging
+import glob
 import os
 import re
 from typing import Dict, List
@@ -72,6 +73,51 @@ class LoRAAdapter(nn.Module):
 
         self.weights: Dict[str, torch.Tensor] = {}
 
+    @staticmethod
+    def _is_lora_weight_name(name: str) -> bool:
+        return "lora_A" in name or "lora_B" in name
+
+    def _try_load_lora_weights_from_local_safetensors(self, model_path: str) -> bool:
+        """Load only LoRA weights from local safetensors files.
+
+        This avoids loading the full safetensors shard into CPU memory (which is
+        critical when the adapter path points to a full-model checkpoint with
+        base weights + LoRA weights mixed together).
+        """
+        if not os.path.isdir(model_path):
+            return False
+
+        st_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+        if not st_files:
+            return False
+
+        try:
+            from safetensors import safe_open
+        except Exception:
+            return False
+
+        num_loaded = 0
+        for st_file in st_files:
+            try:
+                with safe_open(st_file, framework="pt", device="cpu") as f:
+                    for name in f.keys():
+                        if not (
+                            self._is_lora_weight_name(name) and name.endswith("weight")
+                        ):
+                            continue
+                        loaded_weight = f.get_tensor(name)
+                        match = re.search(r"layers\.(\d+)\.", name)
+                        if match is not None:
+                            layer_id = int(match.group(1))
+                            self.layers[layer_id].weights[name] = loaded_weight.cpu()
+                        else:
+                            self.weights[name] = loaded_weight.cpu()
+                        num_loaded += 1
+            except Exception:
+                continue
+
+        return num_loaded > 0
+
     # initialize the LoRA weights to cpu
     def initialize_weights(self):
         model_path = self.config.path
@@ -79,6 +125,7 @@ class LoRAAdapter(nn.Module):
         # start of parallel soft thinking
         # ==========
         loaded_from_state_pt = False
+        loaded_from_safetensors = False
 
         # Prefer local `lora_state.pt` if present (used by token-wise gated LoRA training).
         if os.path.isdir(model_path):
@@ -103,6 +150,8 @@ class LoRAAdapter(nn.Module):
                 for name, loaded_weight in state.items():
                     if not isinstance(loaded_weight, torch.Tensor):
                         continue
+                    if not self._is_lora_weight_name(name):
+                        continue
                     match = re.search(r"layers\.(\d+)\.", name)
                     if match is not None:
                         layer_id = int(match.group(1))
@@ -116,6 +165,11 @@ class LoRAAdapter(nn.Module):
                 loaded_from_state_pt = True
 
         if not loaded_from_state_pt:
+            loaded_from_safetensors = self._try_load_lora_weights_from_local_safetensors(
+                model_path
+            )
+
+        if not loaded_from_state_pt and not loaded_from_safetensors:
             loader = DefaultModelLoader(self.load_config)
             revision = getattr(self.config.hf_config, "revision", None)
             for name, loaded_weight in loader._get_weights_iterator(
@@ -123,6 +177,8 @@ class LoRAAdapter(nn.Module):
                     model_path, revision=revision, fall_back_to_pt=True
                 )
             ):
+                if not self._is_lora_weight_name(name):
+                    continue
                 match = re.search(r"layers\.(\d+)\.", name)
                 if match is not None:
                     layer_id = int(match.group(1))

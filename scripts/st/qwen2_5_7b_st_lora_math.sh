@@ -1,6 +1,7 @@
 # 运行：  bash scripts/st/qwen2_5_7b_st_lora_math.sh
 #!/usr/bin/env bash
 set -euo pipefail
+export CUDA_VISIBLE_DEVICES="2,3"
 
 # 这个脚本用于快速验证：
 # - base model + tokenizer 都使用 Qwen2.5-7B-Instruct 原版

@@ -13,7 +13,9 @@
 # ==============================================================================
 
 import json
+import glob
 import os
+from typing import Optional
 
 from huggingface_hub import snapshot_download
 
@@ -78,6 +80,80 @@ class LoRAConfig:
             "gated_tokenwise": legacy_cfg.get("gated_tokenwise", None),
         }
 
+    @classmethod
+    def _infer_lora_config_from_safetensors(cls, weights_dir: str) -> Optional[dict]:
+        """Infer a PEFT-like LoRA config by scanning local safetensors weights.
+
+        This is mainly used to support "full-model" checkpoints saved as
+        `model*.safetensors` that include LoRA parameters (lora_A/lora_B) but
+        don't ship `adapter_config.json` / `lora_config.json`.
+        """
+        try:
+            from safetensors import safe_open
+        except Exception:
+            return None
+
+        patterns = (
+            "adapter_model*.safetensors",
+            "model*.safetensors",
+            "*.safetensors",
+        )
+        seen = set()
+        st_files = []
+        for pattern in patterns:
+            for path in sorted(glob.glob(os.path.join(weights_dir, pattern))):
+                if path not in seen:
+                    seen.add(path)
+                    st_files.append(path)
+
+        if not st_files:
+            return None
+
+        for st_file in st_files:
+            try:
+                with safe_open(st_file, framework="pt", device="cpu") as f:
+                    keys = list(f.keys())
+                    lora_a_keys = [
+                        k
+                        for k in keys
+                        if ("lora_A" in k and k.endswith("weight"))
+                    ]
+                    if not lora_a_keys:
+                        continue
+
+                    # Infer rank from any lora_A tensor.
+                    r = int(f.get_tensor(lora_a_keys[0]).shape[0])
+
+                    # Infer target module names from parameter paths.
+                    targets = set()
+                    for name in lora_a_keys:
+                        parts = name.split(".")
+                        if "lora_A" in parts:
+                            idx = parts.index("lora_A")
+                            if idx > 0:
+                                targets.add(parts[idx - 1])
+
+                    if not targets:
+                        continue
+
+                    # Default alpha if missing from configs.
+                    lora_alpha = 2 * r
+
+                    return {
+                        "peft_type": "LORA",
+                        "target_modules": sorted(list(targets)),
+                        "r": r,
+                        "lora_alpha": int(lora_alpha),
+                        "lora_dropout": 0.0,
+                        "base_model_name_or_path": None,
+                        "_sglang_inferred_from_safetensors": True,
+                        "_sglang_inferred_from_file": os.path.basename(st_file),
+                    }
+            except Exception:
+                continue
+
+        return None
+
     def get_lora_config(self, dummy=False):
         if dummy:
             raise NotImplementedError()
@@ -101,6 +177,13 @@ class LoRAConfig:
                     legacy_cfg = json.load(f)
                 return self._convert_legacy_lora_config(legacy_cfg)
 
+            inferred = None
+            if os.path.isdir(weights_dir):
+                inferred = self._infer_lora_config_from_safetensors(weights_dir)
+            if inferred is not None:
+                return inferred
+
             raise FileNotFoundError(
-                f"Cannot find LoRA config in {weights_dir}. Expected `adapter_config.json` or `lora_config.json`."
+                f"Cannot find LoRA config in {weights_dir}. Expected `adapter_config.json` or `lora_config.json` "
+                "or safetensors weights containing LoRA parameters."
             )

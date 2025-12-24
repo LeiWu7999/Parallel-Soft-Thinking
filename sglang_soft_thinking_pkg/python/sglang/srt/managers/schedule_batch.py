@@ -629,6 +629,13 @@ class Req:
             # i.e. the indices used by req_to_token / KV cache.
             self.st_entry_pos: Optional[int] = None
             self.st_entry_token_id: Optional[int] = None
+            # Entry-step logits/probs snapshot for entropy-compare decoding at insertion-forward.
+            self.st_entry_entropy: Optional[float] = None
+            self.st_entry_full_logits: Optional[torch.Tensor] = None
+            self.st_entry_topk_prob: Optional[torch.Tensor] = None
+            self.st_entry_topk_idx: Optional[torch.Tensor] = None
+            self.st_insertion_full_logits: Optional[torch.Tensor] = None
+            self.st_selected_full_logits: Optional[torch.Tensor] = None
             self.st_soft_end_pos: Optional[int] = None
             # When a soft segment ends, the next discrete token will be replaced
             # by st_entry_token_id, and the following decode step becomes the
@@ -800,6 +807,20 @@ class Req:
             # ==========
             # begin of parallel soft thinking
             # ==========
+            # If soft thinking is enabled externally (not via the dynamic trigger
+            # branch below), initialize entry bookkeeping on the first soft token.
+            # At this point, output_ids[-1] is the first soft token, so the entry
+            # discrete token is output_ids[-2] at position (cur_pos - 1).
+            # 将非动态soft thinking也适配新的替换token的模式
+            if self.st_entry_pos is None and self.st_entry_token_id is None:
+                if len(self.output_ids) >= 2:
+                    self.st_entry_pos = cur_pos - 1
+                    self.st_entry_token_id = self.output_ids[-2]
+                    self.st_soft_end_pos = cur_pos - 1
+                    self.st_pending_replace = False
+                    self.st_pending_insertion_forward = False
+                    self.st_inflight_insertion_forward = False
+
             if self.st_entry_pos is not None:
                 # Track the last soft token position for this segment.
                 self.st_soft_end_pos = cur_pos
@@ -909,6 +930,20 @@ class Req:
                     # Record entry bookkeeping for KV masking / position rollback.
                     self.st_entry_pos = cur_pos
                     self.st_entry_token_id = self.output_ids[-1]
+                    # Snapshot entry-step entropy & full sampling distribution for later comparison.
+                    # NOTE: logits_output.next_token_logits has been post-processed into probs
+                    # (softmax + topk/top_p/min_p renorm) by Sampler when enable_soft_thinking=True.
+                    self.st_entry_entropy = float(self.entropy)
+                    self.st_entry_full_logits = (
+                        logits_output.next_token_logits[index]
+                        .detach()
+                        .cpu()
+                        .clone()
+                    )
+                    self.st_entry_topk_prob = self.topk_prob.detach().clone()
+                    self.st_entry_topk_idx = self.topk_idx.detach().clone()
+                    self.st_insertion_full_logits = None
+                    self.st_selected_full_logits = None
                     self.st_soft_end_pos = cur_pos
                     self.st_pending_replace = False
                     self.st_pending_insertion_forward = False
@@ -1897,6 +1932,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         #          always uses base (None). For mixed chunked prefill, only the
         #          decoding part can enable LoRA.
         lora_mode = global_server_args_dict.get("lora_mode", "joint")
+        def _is_insertion_step(req: Req) -> bool:
+            return bool(
+                getattr(req, "st_pending_replace", False)
+                or getattr(req, "st_pending_insertion_forward", False)
+                or getattr(req, "st_inflight_insertion_forward", False)
+            )
         if lora_mode == "split" and self.enable_soft_thinking:
             if self.forward_mode.is_extend():
                 # 既有prefill也有decode
@@ -1907,6 +1948,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                             req.lora_path
                             if (req in decoding_req_set)
                             and req.sampling_params.soft_thinking_mode
+                            and not _is_insertion_step(req)
                             else None
                         )
                         for req in self.reqs
@@ -1916,7 +1958,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     lora_paths = [None] * len(self.reqs)
             else:
                 lora_paths = [
-                    req.lora_path if req.sampling_params.soft_thinking_mode else None
+                    req.lora_path
+                    if (
+                        req.sampling_params.soft_thinking_mode
+                        and not _is_insertion_step(req)
+                    )
+                    else None
                     for req in self.reqs
                 ]
         else:
