@@ -24,6 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process some parameters for text generation.')
     parser.add_argument('--dataset', type=str, choices=["math500", "aime2024", "aime2025", "gpqa_diamond", "gsm8k", "amc23", "humaneval", "mbpp", "livecodebench"], help='Name of dataset')
     parser.add_argument('--sampling_backend', type=str, choices=["pytorch", "flashinfer"], default="flashinfer", help='Sampling backend')
+    parser.add_argument('--attention_backend', type=str, choices=["flashinfer", "triton", "torch_native", "fa3"], default=None, help='Attention backend (default: auto-select)')
     parser.add_argument('--model_name', type=str, required=True, default="DeepSeek-R1-Distill-Qwen-1.5B", help='Model name or path')
     parser.add_argument('--num_gpus', type=int, default=8, help='GPU number (tensor parallel size, tp_size)')
     parser.add_argument('--cuda_graph_max_bs', type=int, default=None, help='Max number of batch runned in one time.')
@@ -263,10 +264,12 @@ Test Cases:
             finish_generation_list.extend(r["finish_generation"])
             generated_tokens_list.extend(r["generated_tokens"])
         results = []
-    # if not reeval, collect prompt and idx
+    # if reeval for code datasets, collect prompt and idx from previous results
     else:
+        # if not reeval, collect prompt and idx
         prompt_list = []
         idx_list = []
+        soft_thinking_details_list = []  # 初始化soft-thinking详情列表
         for idx in range(start_idx, min(end_idx,len(samples))):
             sample = samples[idx]
 
@@ -299,7 +302,7 @@ Test Cases:
         idx = 0
         while idx < len(prompt_list):
             print(f"Number of GPUs available: {num_gpus}", flush=True)
-            llm = sgl.Engine(
+            engine_kwargs = dict(
                 model_path=model_name,
                 tokenizer_path=tokenizer_path,
                 tp_size=num_gpus,
@@ -320,6 +323,9 @@ Test Cases:
                 lora_paths=([lora_path] if lora_path is not None else None),
                 lora_mode=args.lora_mode,
             )
+            if args.attention_backend is not None:
+                engine_kwargs["attention_backend"] = args.attention_backend
+            llm = sgl.Engine(**engine_kwargs)
             outputs = llm.generate(
                 prompt_list[idx : idx + max_batch],
                 sampling_params,
@@ -327,9 +333,18 @@ Test Cases:
             )
             decoded_text_list.extend([o["text"] for o in outputs])
             finish_generation_list.extend([o["meta_info"]["finish_reason"]["type"] == "stop" and not args.enable_soft_thinking for o in outputs])
-
             generated_tokens_list.extend([o["meta_info"]["completion_tokens"] for o in outputs])
             trigger_count_list.extend([o["meta_info"].get("trigger_count", 0) for o in outputs])
+            # 收集soft-thinking详细信息
+            for o in outputs:
+                meta_info = o["meta_info"]
+                # 获取soft-thinking详细信息
+                soft_thinking_details = {
+                    "trigger_count": meta_info.get("trigger_count", 0),
+                    "thinking_positions": meta_info.get("thinking_positions", []),
+                    "thinking_token_details": meta_info.get("thinking_token_details", [])
+                }
+                soft_thinking_details_list.append(soft_thinking_details)
             # 打印本次 Engine 运行期间的熵统计（如果可用）
             try:
                 server_info = llm.get_server_info()
@@ -409,6 +424,9 @@ Test Cases:
                     time.sleep(0.5)
 
     # save result
+        # 获取当前样本的soft-thinking详细信息
+        sample_soft_thinking_details = soft_thinking_details_list[i*args.num_samples:(i+1)*args.num_samples]
+        
         result = {
             "hyperparams": str(args),
             "prompt": sample["prompt"][0]["value"],
@@ -423,7 +441,9 @@ Test Cases:
             "finish_generation": finish_generation_list[i*args.num_samples:(i+1)*args.num_samples],
             "judge_info": judge_info,
             "passat1": sum(passat1_list)/len(passat1_list),
-            "passat1_list": passat1_list
+            "passat1_list": passat1_list,
+            # 添加soft-thinking详细信息
+            "soft_thinking_details": sample_soft_thinking_details
         }
         results.append(result)
 

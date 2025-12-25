@@ -104,6 +104,8 @@ class LoRAMemoryPool:
         # Init A tensor, column_major=False
         for module_A in lora_module_A_names:
             lora_A_shape = self.get_lora_A_shape(module_A, base_model)
+            # Debug: Print buffer allocation info
+            # print(f"[BUFFER INIT] Allocating buffer for {module_A}: shape={lora_A_shape}")
             self.A_buffer[module_A] = [
                 torch.empty(
                     lora_A_shape,
@@ -210,6 +212,14 @@ class LoRAMemoryPool:
 
             for name, weights in temp_A_buffer.items():
                 c = get_stacked_multiply(name)
+                # Debug: Print dimensions before copy
+                # buffer_shape = self.A_buffer[name][layer_id][buffer_id][: lora_rank * c, :].shape
+                # weight_shape = weights.shape
+                # if buffer_shape != weight_shape:
+                #     print(f"[DEBUG] Dimension mismatch for {name} layer {layer_id}:")
+                #     print(f"  Buffer shape: {buffer_shape} (lora_rank={lora_rank}, c={c})")
+                #     print(f"  Weight shape: {weight_shape}")
+                #     print(f"  Buffer allocated size: {self.A_buffer[name][layer_id][buffer_id].shape}")
                 self.A_buffer[name][layer_id][buffer_id][: lora_rank * c, :].copy_(
                     weights
                 )
@@ -222,6 +232,14 @@ class LoRAMemoryPool:
                             :, :lora_rank
                         ].copy_(weights[stacked_id])
                 else:
+                    # Debug: Print dimensions before copy
+                    # buffer_shape = self.B_buffer[name][layer_id][0][buffer_id][:, :lora_rank].shape
+                    # weight_shape = weights.shape
+                    # if buffer_shape != weight_shape:
+                    #     print(f"[DEBUG B] Dimension mismatch for {name} layer {layer_id}:")
+                    #     print(f"  Buffer shape: {buffer_shape} (lora_rank={lora_rank})")
+                    #     print(f"  Weight shape: {weight_shape}")
+                    #     print(f"  Full buffer size: {self.B_buffer[name][layer_id][0][buffer_id].shape}")
                     self.B_buffer[name][layer_id][0][buffer_id][:, :lora_rank].copy_(
                         weights
                     )

@@ -730,6 +730,8 @@ class SchedulerOutputProcessorMixin:
         output_topk_probs_list = []
         output_topk_indices_list = []
         trigger_counts = []
+        thinking_positions_list = []
+        thinking_token_details_list = []
         # ==========
         # end of soft thinking
         # ==========
@@ -810,6 +812,9 @@ class SchedulerOutputProcessorMixin:
                     output_topk_probs_list.append(req.get_output_topk_prob_list())
                     output_topk_indices_list.append(req.get_output_topk_idx_list())
                 trigger_counts.append(getattr(req, "trigger_count", 0))
+                # 收集soft-thinking详细信息
+                thinking_positions_list.append(getattr(req, "thinking_positions", []))
+                thinking_token_details_list.append(getattr(req, "thinking_token_details", []))
                 # ==========
                 # end of soft thinking
                 # ==========
@@ -854,6 +859,8 @@ class SchedulerOutputProcessorMixin:
                     output_topk_probs_list,
                     output_topk_indices_list,
                     trigger_counts,
+                    thinking_positions_list,
+                    thinking_token_details_list,
                     # ==========
                     # end of soft thinking
                     # ==========

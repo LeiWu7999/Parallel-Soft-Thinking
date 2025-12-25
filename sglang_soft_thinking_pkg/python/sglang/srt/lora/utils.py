@@ -92,12 +92,33 @@ def get_hidden_dim(
         Please implement the function in the model class if it is not.
         You can reference this function in llama.py.
         """
-        if module_name in ["q_proj", "o_proj", "qkv_proj"]:
-            return config.hidden_size, config.hidden_size
+        # Get head_dim from config if available
+        num_heads = config.num_attention_heads
+        head_dim = getattr(config, 'head_dim', config.hidden_size // num_heads)
+        qkv_output_dim = num_heads * head_dim
+        
+        if module_name == "q_proj":
+            # q_proj: input = hidden_size, output = num_heads * head_dim
+            return config.hidden_size, qkv_output_dim
+        elif module_name == "qkv_proj":
+            # qkv_proj (stacked): for buffer allocation
+            return config.hidden_size, qkv_output_dim
+        elif module_name == "o_proj":
+            # o_proj: input = num_heads * head_dim, output = hidden_size
+            return qkv_output_dim, config.hidden_size
+        elif module_name in ["k_proj", "v_proj"]:
+            # k_proj and v_proj use num_key_value_heads instead of num_attention_heads
+            num_kv_heads = config.num_key_value_heads
+            kv_output_dim = num_kv_heads * head_dim
+            return config.hidden_size, kv_output_dim
         elif module_name in ["kv_proj"]:
-            return config.hidden_size, config.hidden_size // (
-                config.num_attention_heads // config.num_key_value_heads
-            )
+            # kv_proj (stacked k and v)
+            num_kv_heads = config.num_key_value_heads
+            kv_output_dim = num_kv_heads * head_dim
+            return config.hidden_size, kv_output_dim
+        elif module_name in ["gate_proj", "up_proj"]:
+            # gate_proj and up_proj output to intermediate_size
+            return config.hidden_size, config.intermediate_size
         elif module_name == "gate_up_proj":
             return config.hidden_size, config.intermediate_size
         elif module_name == "down_proj":

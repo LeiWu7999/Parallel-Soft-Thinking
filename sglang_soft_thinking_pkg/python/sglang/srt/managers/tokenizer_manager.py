@@ -1050,6 +1050,12 @@ class TokenizerManager:
 
             if getattr(recv_obj, "trigger_counts", None):
                 meta_info["trigger_count"] = recv_obj.trigger_counts[i]
+            
+            # 添加soft-thinking详细信息
+            if getattr(recv_obj, "thinking_positions_list", None):
+                meta_info["thinking_positions"] = recv_obj.thinking_positions_list[i]
+            if getattr(recv_obj, "thinking_token_details_list", None):
+                meta_info["thinking_token_details"] = recv_obj.thinking_token_details_list[i]
 
             if getattr(state.obj, "return_logprob", False):
                 self.convert_logprob_style(

@@ -1,7 +1,7 @@
 # 运行：  bash scripts/st/qwen2_5_7b_st_lora_math.sh
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES="2,3"
+# export CUDA_VISIBLE_DEVICES="2,3"
 
 # 这个脚本用于快速验证：
 # - base model + tokenizer 都使用 Qwen2.5-7B-Instruct 原版
@@ -18,12 +18,13 @@ cd "${PROJ_DIR}"
 
 # ===== 模型/Tokenizer/LoRA =====
 # 基座模型（HF repo id 或本地路径）
-BASE_MODEL="Qwen/Qwen2.5-7B-Instruct"
+BASE_MODEL="/home/work/tanweiqi/model/checkpoint-epoch-3-step-945"
+# BASE_MODEL="Qwen/Qwen2.5-7B-Instruct"
 # tokenizer（这里强制使用原版 tokenizer；如果不传，会默认用 lora_path 目录）
-TOKENIZER_PATH="Qwen/Qwen2.5-7B-Instruct"
+TOKENIZER_PATH="/home/work/tanweiqi/model/checkpoint-epoch-3-step-945"
 # 你的 LoRA checkpoint 目录（必须包含 lora_state.pt + lora_config.json），会自动检测peft类型和我们自己定义的类型
-LORA_CKPT_DIR="/home/ubuntu/Documents/newdisk_22T/twq/soft_thinking_exp/Parallel-Soft-Thinking/models/checkpoints/soft_thinking_qwen2p5_7b/checkpoint-epoch-3-step-8958"
-
+# LORA_CKPT_DIR="/home/ubuntu/Documents/newdisk_22T/twq/soft_thinking_exp/Parallel-Soft-Thinking/models/checkpoints/soft_thinking_qwen2p5_7b/checkpoint-epoch-3-step-8958"
+LORA_CKPT_DIR="/home/work/tanweiqi/model/checkpoint-epoch-3-step-945"
 # ===== 运行资源配置 =====
 TP_SIZE=2                    # tensor parallel 张数（--num_gpus）
 MEM_FRACTION_STATIC=0.8      # 每张卡可用显存比例（--mem_fraction_static）
@@ -69,6 +70,7 @@ LORA_MODE="split"            # （--lora_mode）
 args=(
   # ===== 数据集/基础配置 =====
   --dataset "math500"                    # 评测数据集
+  --attention_backend "triton"           # 使用triton后端避免FlashInfer JIT编译问题
   --model_name "${BASE_MODEL}"           # 推理基座模型
   --tokenizer_path "${TOKENIZER_PATH}"   # tokenizer 路径（强制原版）
 

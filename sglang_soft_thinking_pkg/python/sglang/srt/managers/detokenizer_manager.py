@@ -235,6 +235,8 @@ class DetokenizerManager:
             output_topk_probs_list=recv_obj.output_topk_probs_list,
             output_topk_indices_list=recv_obj.output_topk_indices_list,
             trigger_counts=recv_obj.trigger_counts,
+            thinking_positions_list=getattr(recv_obj, "thinking_positions_list", []),
+            thinking_token_details_list=getattr(recv_obj, "thinking_token_details_list", []),
             # ==========
             # end of soft thinking
             # ==========

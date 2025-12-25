@@ -607,7 +607,9 @@ class BatchTokenIDOut:
     # Soft thinking
     output_topk_probs_list: List[List[List[float]]]
     output_topk_indices_list: List[List[List[int]]]
-    trigger_counts: Optional[List[int]] = None
+    trigger_counts: List[int]
+    thinking_positions_list: List[List[int]]
+    thinking_token_details_list: List[List[dict]]
     # ==========
     # end of soft thinking
     # ==========
@@ -664,7 +666,9 @@ class BatchStrOut:
     # ==========
     output_topk_probs_list: List[List[List[float]]]
     output_topk_indices_list: List[List[List[int]]]
-    trigger_counts: Optional[List[int]] = None
+    trigger_counts: Optional[List[int]]
+    thinking_positions_list: Optional[List[List[int]]]
+    thinking_token_details_list: Optional[List[List[dict]]]
     # ==========
     # end of soft thinking
     # ==========

@@ -621,6 +621,13 @@ class Req:
             # New fields for dynamic triggering
             self.trigger_count = 0
             self.current_soft_thinking_steps = 0
+            # New fields for detailed soft-thinking tracking
+            self.thinking_positions = []  # List of positions where soft-thinking was triggered
+            self.thinking_token_details = []  # List of dicts with detailed info for each trigger
+            # 当前这轮soft-thinking的临时记录
+            self.current_thinking_topk_probs = []  # 当前轮次的所有topk概率 (二维列表)
+            self.current_thinking_topk_indices = []  # 当前轮次的所有topk索引 (二维列表)
+            self.current_thinking_start_pos = None  # 当前轮次的起始位置
 
             # ==========
             # begin of parallel soft thinking
@@ -827,6 +834,11 @@ class Req:
             # ==========
             # end of parallel soft thinking
             # ==========
+            
+            # 记录soft-thinking过程中每一步的top-k信息
+            self.current_thinking_topk_probs.append(self.topk_prob.detach().cpu().tolist())
+            self.current_thinking_topk_indices.append(self.topk_idx.detach().cpu().tolist())
+            
             should_exit = False
             
             if dynamic_enabled:
@@ -877,6 +889,22 @@ class Req:
                 # logger.info(f"self.topk_idx[0] == self.output_ids[-1] : {self.topk_idx[0] == self.output_ids[-1] }")
                 self.low_entropy_steps = 0
                 self.current_soft_thinking_steps = 0
+                
+                # 保存这一轮soft-thinking的完整信息
+                if self.current_thinking_start_pos is not None:
+                    thinking_detail = {
+                        "trigger_position": self.current_thinking_start_pos,
+                        "end_position": cur_pos,
+                        "num_steps": len(self.current_thinking_topk_probs),
+                        "topk_probabilities": self.current_thinking_topk_probs,  # 二维列表
+                        "topk_indices": self.current_thinking_topk_indices,  # 二维列表
+                    }
+                    self.thinking_token_details.append(thinking_detail)
+                    # 清空当前轮次的记录
+                    self.current_thinking_topk_probs = []
+                    self.current_thinking_topk_indices = []
+                    self.current_thinking_start_pos = None
+                
                 # ==========
                 # begin of parallel soft thinking
                 # ==========
@@ -948,6 +976,12 @@ class Req:
                     self.st_pending_replace = False
                     self.st_pending_insertion_forward = False
                     self.st_inflight_insertion_forward = False
+                    
+                    # 开始新一轮的soft-thinking记录
+                    self.thinking_positions.append(cur_pos)
+                    self.current_thinking_start_pos = cur_pos
+                    self.current_thinking_topk_probs = [self.topk_prob.detach().cpu().tolist()]
+                    self.current_thinking_topk_indices = [self.topk_idx.detach().cpu().tolist()]
             
             if not triggered:
                 # 保持离散模式，手动坍缩 topk 为 one-hot

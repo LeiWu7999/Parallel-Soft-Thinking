@@ -297,6 +297,15 @@ class Qwen3ForCausalLM(nn.Module):
                 continue
             if name.startswith("model.vision_tower") and name not in params_dict:
                 continue
+            
+            # Skip LoRA weights (lora_A, lora_B) - they will be handled by LoRAManager
+            if "lora_A" in name or "lora_B" in name:
+                continue
+            
+            # Handle weights with .base.weight suffix (from LoRA-merged checkpoints)
+            # Convert "model.layers.X.mlp.down_proj.base.weight" to "model.layers.X.mlp.down_proj.weight"
+            if ".base.weight" in name:
+                name = name.replace(".base.weight", ".weight")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
