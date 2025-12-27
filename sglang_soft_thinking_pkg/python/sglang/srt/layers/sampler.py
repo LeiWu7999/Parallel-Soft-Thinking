@@ -148,6 +148,9 @@ class Sampler(nn.Module):
                     # top k top p renorm
                     probs = top_k_renorm_prob(probs, top_ks)
                     probs = top_p_renorm_prob(probs, top_ps)
+                    # Add numerical stability after renorm kernels
+                    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+                    probs = probs.clamp(min=0.0)
 
                     # minp renorm
                     if sampling_info.need_min_p_sampling or sampling_info.need_after_thinking_min_p_sampling: # slow
@@ -155,7 +158,9 @@ class Sampler(nn.Module):
                         min_p_thresholds = max_prob * min_ps.view(-1, 1)
                         min_p_mask = probs < min_p_thresholds
                         probs.masked_fill_(min_p_mask, 0.0)
-                        probs = probs / probs.sum(dim=-1, keepdim=True)
+                        probs_sum = probs.sum(dim=-1, keepdim=True)
+                        probs_sum = probs_sum.clamp(min=1e-12)  # Avoid division by zero
+                        probs = probs / probs_sum
 
                     # dirichlet noise (not used in paper)
                     if add_noise_dirichlet: # slow
@@ -167,7 +172,8 @@ class Sampler(nn.Module):
 
                     # max top k
                     topk_probs, topk_indices = torch.topk(probs, k=sampling_info.max_topk, dim=-1) # slow
-                    topk_probs = topk_probs / (topk_probs.sum(dim=-1, keepdim=True))
+                    topk_sum = topk_probs.sum(dim=-1, keepdim=True).clamp(min=1e-12)  # Avoid division by zero
+                    topk_probs = topk_probs / topk_sum
 
                     # gumbel softmax noise (not used in paper)
                     if add_noise_gumbel_softmax: # slow
@@ -188,6 +194,13 @@ class Sampler(nn.Module):
                     # after thinking sampling
                     non_soft_mask = ~soft_mask
                     if any(non_soft_mask):
+                        # Ensure probs is valid before multinomial sampling
+                        probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+                        probs = probs.clamp(min=0.0)
+                        # Add small epsilon to avoid all-zero rows causing multinomial to fail
+                        # Use 1e-6 for better numerical stability with bfloat16
+                        probs = probs + 1e-9
+                        probs = probs / probs.sum(dim=-1, keepdim=True)
                         sampled_token_ids = torch.multinomial(probs, num_samples=1)
 
                         # For rows where soft_thinking_modes is False
