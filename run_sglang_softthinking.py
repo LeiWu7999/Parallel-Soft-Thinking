@@ -331,18 +331,47 @@ Test Cases:
                 sampling_params,
                 lora_path=(lora_request_uid if lora_request_uid is not None else None),
             )
-            decoded_text_list.extend([o["text"] for o in outputs])
-            finish_generation_list.extend([o["meta_info"]["finish_reason"]["type"] == "stop" and not args.enable_soft_thinking for o in outputs])
-            generated_tokens_list.extend([o["meta_info"]["completion_tokens"] for o in outputs])
-            trigger_count_list.extend([o["meta_info"].get("trigger_count", 0) for o in outputs])
-            # 收集soft-thinking详细信息
+            # 处理每个输出，移除 soft-thinking 位置的 token
             for o in outputs:
                 meta_info = o["meta_info"]
+                thinking_token_details = meta_info.get("thinking_token_details", [])
+                output_ids = o.get("output_ids", [])
+                
+                # 如果有 soft-thinking token，需要移除这些位置的 token 并重新解码
+                if thinking_token_details and output_ids:
+                    # 收集所有需要移除的位置范围
+                    positions_to_remove = set()
+                    for detail in thinking_token_details:
+                        trigger_pos = detail.get("trigger_position", -1)
+                        num_steps = detail.get("num_steps", 0)
+                        if trigger_pos >= 0 and num_steps > 0:
+                            # soft-thinking 的 token 位置是从 trigger_pos 开始的 num_steps 个位置
+                            for pos in range(trigger_pos, trigger_pos + num_steps):
+                                positions_to_remove.add(pos)
+                    
+                    # 过滤掉 soft-thinking 位置的 token
+                    if positions_to_remove:
+                        filtered_ids = [
+                            token_id for i, token_id in enumerate(output_ids)
+                            if i not in positions_to_remove
+                        ]
+                        # 重新解码
+                        clean_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)
+                        decoded_text_list.append(clean_text)
+                    else:
+                        decoded_text_list.append(o["text"])
+                else:
+                    decoded_text_list.append(o["text"])
+                
+                finish_generation_list.append(meta_info["finish_reason"]["type"] == "stop" and not args.enable_soft_thinking)
+                generated_tokens_list.append(meta_info["completion_tokens"])
+                trigger_count_list.append(meta_info.get("trigger_count", 0))
+                
                 # 获取soft-thinking详细信息
                 soft_thinking_details = {
                     "trigger_count": meta_info.get("trigger_count", 0),
                     "thinking_positions": meta_info.get("thinking_positions", []),
-                    "thinking_token_details": meta_info.get("thinking_token_details", [])
+                    "thinking_token_details": thinking_token_details
                 }
                 soft_thinking_details_list.append(soft_thinking_details)
             # 打印本次 Engine 运行期间的熵统计（如果可用）
@@ -447,9 +476,9 @@ Test Cases:
         }
         results.append(result)
 
-    with open(results_file, "w") as f:
+    with open(results_file, "w", encoding="utf-8") as f:
         results.sort(key=lambda x: x["idx"])
-        json.dump(results, f, indent=4)
+        json.dump(results, f, indent=4, ensure_ascii=False)
     
     # convert livecodebench format
     if dataset == "livecodebench":
@@ -495,9 +524,9 @@ Test Cases:
                         r["passat1_list"] = [int(passat1) for passat1 in lcb_r["graded_list"]]
                         r["judge_info"] = lcb_r["metadata"]
                         break
-            with open(results_file, "w") as f:
+            with open(results_file, "w", encoding="utf-8") as f:
                 results.sort(key=lambda x: x["idx"])
-                json.dump(results, f, indent=4)
+                json.dump(results, f, indent=4, ensure_ascii=False)
 
     # calculate statistics
     total_num = len(results)
@@ -521,8 +550,8 @@ Test Cases:
     results_statistics["all_idx"] = {i:j for i,j in all_idx}
 
     # save results_statistics
-    with open(results_statistics_file, "w") as f:
-        json.dump(results_statistics, f, indent=4)
+    with open(results_statistics_file, "w", encoding="utf-8") as f:
+        json.dump(results_statistics, f, indent=4, ensure_ascii=False)
 
     # push results_statistics to huggingface
     if args.push_results_to_hf:
